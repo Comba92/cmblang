@@ -1,0 +1,18 @@
+{
+  "version": "alpha",
+  "authors": [
+    "Comba"
+  ],
+  "langrev": "1",
+  "warnings": [ "no-unused" ],
+  "sources": [ "./**" ],
+  "dependency-search-paths": [ "lib" ],
+  "dependencies": [],
+  "cc": "gcc",
+  "c-sources": [ "./c-source/**" ],
+  "targets": {
+    "default": {
+      "type": "executable"
+    }
+  }
+}
