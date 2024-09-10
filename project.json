@@ -6,10 +6,10 @@
   "langrev": "1",
   "warnings": [ "no-unused" ],
   "sources": [ "./**" ],
-  "dependency-search-paths": [ "lib" ],
+  "dependency-search-paths": [],
   "dependencies": [],
   "cc": "gcc",
-  "c-sources": [ "./c-source/**" ],
+  "c-sources": [],
   "targets": {
     "default": {
       "type": "executable"

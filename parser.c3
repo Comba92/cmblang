@@ -11,7 +11,11 @@ fault ParserErr {
     INVALID_TOKEN,
     UNTERMINATED_GROUPING,
     UNTERMINATED_BLOCK,
-    INVALID_ASSIGN_TARGET
+    INVALID_ASSIGN_TARGET,
+    MISSING_IF_PARENTHESIS,
+    UNTERMINATED_IF_CONDITION,
+    INVALID_VAR_NAME,
+    MISSING_VAR_INITIALIZATION
 }
 
 struct Parser {
@@ -91,11 +95,30 @@ fn StmtList parse(TokenList tokens) {
 }
 
 fn Stmt* stmt(Parser* parser) {
+    if (parser.match(TokenKind.VAR_KEY)) {
+        return mem::new(Stmt, *vars(parser));
+    }
     if (parser.match(TokenKind.LEFTBRACE)) {
         return mem::new(Stmt, *block(parser));
     }
+    if (parser.match(TokenKind.IF_KEY)) {
+        return mem::new(Stmt, *ifs(parser));
+    }
+    if (parser.match(TokenKind.WHILE_KEY)) {
+        return mem::new(Stmt, *whiles(parser));
+    }
 
     return mem::new(Stmt, Stmt {.kind = StmtKind.EXPR, .expr = expr(parser)});
+}
+
+fn Stmt* vars(Parser* parser) {
+    parser.consume();
+    Token* name = parser.expect(TokenKind.IDENTIFIER, ParserErr.INVALID_VAR_NAME);
+    parser.expect(TokenKind.EQUAL, ParserErr.MISSING_VAR_INITIALIZATION);
+    Expr* value = expr(parser);
+
+    VarStmt* vars = mem::new(VarStmt, VarStmt {.name = name, .value = value});
+    return mem::new(Stmt, Stmt {.kind = StmtKind.VAR, .vars = vars});
 }
 
 fn Stmt* block(Parser* parser) {
@@ -110,6 +133,34 @@ fn Stmt* block(Parser* parser) {
     Token* right = parser.expect(TokenKind.RIGHTBRACE, ParserErr.UNTERMINATED_BLOCK);
     BlockStmt* block = mem::new(BlockStmt, BlockStmt {.left = left, .right = right, .body = body});
     return mem::new(Stmt, Stmt {.kind = StmtKind.BLOCK, .block = block});
+}
+
+fn Stmt* ifs(Parser* parser) {
+    parser.consume();
+    parser.expect(TokenKind.LEFTPAREN, ParserErr.MISSING_IF_PARENTHESIS);
+    Expr* condition = expr(parser);
+    parser.expect(TokenKind.RIGHTPAREN, ParserErr.UNTERMINATED_IF_CONDITION);
+
+    Stmt* ifs_branch = stmt(parser);
+    Stmt* else_branch = null;
+    if (parser.match(TokenKind.ELSE_KEY)) {
+        parser.consume();
+        else_branch = stmt(parser); 
+    }
+
+    IfStmt* ifs = mem::new(IfStmt, IfStmt {.condition = condition, .if_branch = ifs_branch, .else_branch = else_branch});
+    return mem::new(Stmt, Stmt {.kind = StmtKind.IF, .ifs = ifs});
+}
+
+fn Stmt* whiles(Parser* parser) {
+    parser.consume();
+    parser.expect(TokenKind.LEFTPAREN, ParserErr.MISSING_IF_PARENTHESIS);
+    Expr* condition = expr(parser);
+    parser.expect(TokenKind.RIGHTPAREN, ParserErr.UNTERMINATED_IF_CONDITION);
+
+    Stmt* body = stmt(parser);
+    WhileStmt* whiles = mem::new(WhileStmt, WhileStmt {.condition = condition, .body = body});
+    return mem::new(Stmt, Stmt {.kind = StmtKind.WHILE, .whiles = whiles});
 }
 
 fn Expr* expr(Parser* parser) {

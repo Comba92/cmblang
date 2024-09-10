@@ -9,7 +9,7 @@ enum TokenKind {
 	INVALID,
 	NUMBER, IDENTIFIER,
 	STRING, BOOL, NULL,
-	IF_KEY, ELSE_KEY, WHILE_KEY, FOR_KEY,
+	VAR_KEY, IF_KEY, ELSE_KEY, WHILE_KEY, FOR_KEY,
 	ADD, SUB, MUL, DIV,
 	AND, OR, NOT,
 	EQUAL, EQUALEQUAL, BANG, BANGEQUAL,
@@ -25,7 +25,7 @@ fn bool TokenKind.match_any(TokenKind self, TokenKind[] kinds) {
 }
 
 const char[][*] KEYWORDS = {
-	"true", "false", "and", "or", "not", "null", "if", "else", "while", "for"
+	"true", "false", "and", "or", "not", "null", "var", "if", "else", "while", "for"
 };
 
 struct Location {
@@ -219,6 +219,7 @@ fn TokenKind scan_keyword(char[] maybe_keyword) {
 
 		case "null": return TokenKind.NULL;
 
+		case "var": return TokenKind.VAR_KEY;
 		case "if": return TokenKind.IF_KEY;
 		case "else": return TokenKind.ELSE_KEY;
 		case "while": return TokenKind.WHILE_KEY;

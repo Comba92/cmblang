@@ -95,6 +95,11 @@ fn void Env.execute(Env* self, Stmt stmt) {
       Value res = self.evaluate(*stmt.expr);
       if (!self.panicked) res.print();
     }
+    case VAR: {
+      Value res = self.evaluate(*stmt.vars.value);
+      self.current_scope().set(stmt.vars.name.lexeme, res);
+      res.print();
+    }
     case BLOCK: {
       self.add_scope();
       
@@ -113,6 +118,7 @@ fn void Env.execute(Env* self, Stmt stmt) {
       }
     }
     case WHILE: {
+      io::printn("executing while...");
       Value cond = self.evaluate(*stmt.whiles.condition);
       while(cond.boolean) {
         self.execute(*stmt.whiles.body);
@@ -153,7 +159,9 @@ fn Value Env.evaluate(Env* self, Expr expr) {
       }
     }
     case ASSIGN: {
+      // FIXME: currently assignment only updates a variable in its current scope (if it doesnt exists it creates one)
       char[] name = expr.assign.identifier.literal.lexeme;
+      self.get_identifier_value(name);
       Value result = self.evaluate(*expr.assign.value);
       self.current_scope().set(name, result);
       return result;
