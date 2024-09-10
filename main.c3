@@ -4,7 +4,7 @@ import eval;
 import std::io;
 
 fn void! repl() {
-    Env* env = mem::new(Env, Env {});
+    Env env = {};
 
     while (true) {
         io::print("> ");
@@ -12,7 +12,7 @@ fn void! repl() {
         if (catch line) { continue; }
         if (line.len == 0) { continue; }
         
-        interpret(line, env);
+        interpret(line, &env);
     }
 }
 

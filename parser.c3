@@ -202,17 +202,18 @@ fn Expr* primary(Parser* parser) {
     Token* token = parser.consume();
 
     switch (token.kind) {
-        case TokenKind.LEFTPAREN: {
+        case LEFTPAREN: {
             Token* left = token;
             Expr* e = expr(parser);
             Token* right = parser.expect(TokenKind.RIGHTPAREN, ParserErr.UNTERMINATED_GROUPING);
             GroupingExpr group = {.left = left, .expr = e, .right = right};
             return mem::new(Expr, Expr {.kind = ExprKind.GROUPING, .grouping = group});
         }
-        case TokenKind.NUMBER: {
-            return mem::new(Expr, Expr {.kind = ExprKind.LITERAL, .literal = token});
-        }
-        case TokenKind.IDENTIFIER: {
+        case NULL: nextcase;
+        case BOOL: nextcase;
+        case NUMBER: nextcase;
+        case STRING: nextcase;
+        case IDENTIFIER: {
             return mem::new(Expr, Expr {.kind = ExprKind.LITERAL, .literal = token});
         }
         default: {

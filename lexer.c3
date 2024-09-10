@@ -1,11 +1,15 @@
 module lexer;
 import std::io;
 import std::collections::list;
+
 def TokenList = List(<Token*>);
+def StrList = List(<char[]>);
 
 enum TokenKind {
 	INVALID,
-	NUMBER, IDENTIFIER, KEYWORD,
+	NUMBER, IDENTIFIER,
+	STRING, BOOL, NULL,
+	IF_KEY,
 	ADD, SUB, MUL, DIV,
 	EQUAL, EQUALEQUAL, BANG, BANGEQUAL, LESS, LESSEQUAL, GREATER, GREATEREQUAL, COMMA,
 	LEFTPAREN, RIGHTPAREN, LEFTBRACKET, RIGHTBRACKET, LEFTBRACE, RIGHTBRACE,
@@ -17,6 +21,10 @@ fn bool TokenKind.match_any(TokenKind self, TokenKind[] kinds) {
 
 	return false;
 }
+
+const char[][*] KEYWORDS = {
+	"true", "false", "null", "if" 
+};
 
 struct Location {
 	usz index, line, col;
@@ -111,18 +119,35 @@ fn TokenList scan(char[] input) {
 			case '*': kind = TokenKind.MUL;
 			case '/': kind = TokenKind.DIV;
 
-			case '=': 
+			case '=': {
 				if (lexer.eat_if('=')) { kind = TokenKind.EQUALEQUAL; }
 				else { kind = TokenKind.EQUAL; }
+			}
+			case '!': {
+				if (lexer.eat_if('=')) { kind = TokenKind.BANGEQUAL; }
+				else { kind = TokenKind.BANG; }
+			}
+
+			case '"': {
+				// TODO: string lexing here
+				unreachable();
+			}
+
 
 			default: {
 				if (c.is_digit()) {
 					scan_number(&lexer);
 					kind = TokenKind.NUMBER;
 				} else if (c.is_alpha()) {
-					//TODO: parse keyword
-					scan_identifier(&lexer);
-					kind = TokenKind.IDENTIFIER;
+					scan_identifier(&lexer);					
+					
+					TokenKind maybe_keyword = scan_keyword(input[start.index..lexer.loc.index-1]);
+
+					if (maybe_keyword != TokenKind.INVALID) {
+						kind = maybe_keyword;
+					} else { 
+						kind = TokenKind.IDENTIFIER;
+					}
 				} else {
 					lexer.panic(LexerErr.INVALID_CHARACTER);
 				}
@@ -149,6 +174,33 @@ fn void scan_number(Lexer* lexer) {
 	while (lexer.current().is_digit()) { lexer.eat(); }
 }
 
+fn void scan_string(Lexer* lexer) {
+	// TOOD: implement strings
+	unreachable();
+}
+
 fn void scan_identifier(Lexer* lexer) {
 	while (lexer.current().is_alnum()) { lexer.eat(); }
+}
+
+fn TokenKind scan_keyword(char[] maybe_keyword) {
+	bool is_keyword = false;
+	foreach (keyword : KEYWORDS) {
+		if (equals(maybe_keyword, keyword)) {
+			is_keyword = true;
+			break;
+		}
+	}
+				
+	if (!is_keyword) return TokenKind.INVALID;
+
+	switch (maybe_keyword) {
+		case "true": nextcase;
+		case "false": return TokenKind.BOOL;
+
+		case "null": return TokenKind.NULL;
+		case "if": return TokenKind.IF_KEY;
+
+		default: unreachable();
+	}
 }
