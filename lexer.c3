@@ -135,6 +135,14 @@ fn TokenList scan(char[] input) {
 				if (lexer.eat_if('=')) { kind = TokenKind.BANGEQUAL; }
 				else { kind = TokenKind.BANG; }
 			}
+			case '>': {
+				if (lexer.eat_if('=')) { kind = TokenKind.GREATEREQUAL; }
+				else { kind = TokenKind.GREATER; }
+			}
+			case '<': {
+				if (lexer.eat_if('=')) { kind = TokenKind.LESSEQUAL; }
+				else { kind = TokenKind.LESSEQUAL; }
+			}
 
 			case '"': {
 				// TODO: string lexing here
