@@ -48,6 +48,7 @@ struct Expr {
         AssignExpr assign;
     }
 }
+
 fn void Expr.debug(Expr self) {
     switch (self.kind) {
       case LITERAL: io::printf("LITERAL: %s", self.literal.lexeme);

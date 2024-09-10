@@ -4,32 +4,29 @@ import eval;
 import std::io;
 
 fn void! repl() {
+    Env* env = mem::new(Env, Env {});
+
     while (true) {
         io::print("> ");
         String! line = io::readline();
         if (catch line) { continue; }
         if (line.len == 0) { continue; }
         
-        interpret(line);
+        interpret(line, env);
     }
 }
 
-fn void interpret(String input) {
+fn void interpret(String input, Env* env) {
     DynamicArenaAllocator arena;
     arena.init(2048, allocator::heap());
     
-    mem::@scoped(&arena) {
-        TokenList tokens = lexer::scan(input);
-        StmtList stmts = parser::parse(tokens);
-        eval::run(stmts);
-    };
-
-    arena.free();
+    TokenList tokens = lexer::scan(input);
+    StmtList stmts = parser::parse(tokens);
+    env.run(stmts);
 }
 
 fn void main() {
     String header = string::new_format("Hello!\n");
     io::printn(header);
-
     repl()!!;
 }

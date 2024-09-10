@@ -7,25 +7,35 @@ import ast;
 import std::io;
 import std::collections::list;
 import std::collections::map;
+
 def Scope = HashMap(<char[], Value>);
 def ScopeList = List(<Scope*>);
 
-struct Environment {
-  StmtList statements;
+struct Env {
   ScopeList scopes;
 }
-fn void Environment.add_scope(Environment* self) {
+
+fn void Env.add_scope(Env* self) {
   Scope* scope = mem::new(Scope, Scope {});
   self.scopes.push(scope);
 }
-fn void Environment.remove_scope(Environment* self) {
+fn void Env.remove_scope(Env* self) {
   self.scopes.pop() ?? null;
 }
-fn Scope* Environment.current_scope(Environment self) {
+fn Scope* Env.current_scope(Env self) {
   return self.scopes.last() ?? null;
 }
+fn Value Env.find_identifier(Env self, char[] id) {
+  int current_scope = (int)self.scopes.len()-1;
+  while (current_scope >= 0) {
+    Scope* scope = self.scopes.get(current_scope);
+    Value! val = scope.get(id);
+    if (try val) return val;
+    current_scope -= 1;
+  }
 
-Environment env = Environment {};
+  return Value {.kind = ValueKind.NULL};
+}
 
 enum ValueKind { NUMBER, NULL }
 struct Value {
@@ -41,33 +51,39 @@ fn void Value.print(Value self) {
   }
 }
 
-fn void run(StmtList stmts) {
-  if (env.scopes.len() == 0) env.add_scope();
+fn void Env.run(Env* self, StmtList stmts) {
+  if (self.scopes.len() == 0) self.add_scope();
   
   foreach(stmt : stmts) {
-    execute(*stmt);
+    self.execute(*stmt);
   }
+
+    // io::printn("Scope: ");
+    // Scope.@each(*scope; char[] key, Value val) {
+    //   io::printn(key);
+    //   val.print();
+    // };
 }
 
-fn void execute(Stmt stmt) {
+fn void Env.execute(Env* self, Stmt stmt) {
   switch (stmt.kind) {
     case EXPR: {
-      Value res = evaluate(stmt.expr);
+      Value res = self.evaluate(stmt.expr);
       res.print();
     }
     case BLOCK: {
-      env.add_scope();
+      self.add_scope();
       
       foreach (s : stmt.block.body) {
-        execute(*s);
+        self.execute(*s);
       }
 
-      env.remove_scope();
+      self.remove_scope();
     }
   }
 }
 
-fn Value evaluate(Expr expr) {  
+fn Value Env.evaluate(Env* self, Expr expr) {  
   switch (expr.kind) {
     case LITERAL: {
       switch (expr.literal.kind) {
@@ -78,25 +94,22 @@ fn Value evaluate(Expr expr) {
           result.number = temp.to_float()!!;
           return result;
         }
-        case IDENTIFIER: {
-          //TODO: search in upper scope if not found
-          return env.current_scope().get(expr.literal.lexeme) ?? Value {.kind = ValueKind.NULL};
-        }
+        case IDENTIFIER: return self.find_identifier(expr.literal.lexeme);
         default: unreachable();
       }
     }
     case ASSIGN: {
       char[] name = expr.assign.identifier.literal.lexeme;
-      Value result = evaluate(*expr.assign.value);
-      env.current_scope().set(name, result);
+      Value result = self.evaluate(*expr.assign.value);
+      self.current_scope().set(name, result);
       return result;
     }
     case GROUPING: {
-      return evaluate(*expr.grouping.expr);
+      return self.evaluate(*expr.grouping.expr);
     }
     case BINARY: {
-      Value left = evaluate(*expr.binary.left);
-      Value right = evaluate(*expr.binary.right);
+      Value left = self.evaluate(*expr.binary.left);
+      Value right = self.evaluate(*expr.binary.right);
 
       Value result;
       result.kind = ValueKind.NUMBER;
@@ -110,7 +123,7 @@ fn Value evaluate(Expr expr) {
       return result;
     }
     case UNARY: {
-      Value right = evaluate(*expr.unary.right);
+      Value right = self.evaluate(*expr.unary.right);
       Value result;
       result.kind = ValueKind.NUMBER;
       //TODO:
