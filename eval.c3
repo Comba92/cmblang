@@ -18,6 +18,7 @@ struct Env {
 
 fault RuntimeErr {
   INVALID_OPERAND_TYPE,
+  INVALID_OPERATION,
   UNDEFINED_IDENTIFIER
 }
 
@@ -40,8 +41,7 @@ fn Value Env.get_identifier_value(Env* self, char[] id) {
     current_scope -= 1;
   }
 
-  self.panic(RuntimeErr.UNDEFINED_IDENTIFIER);
-  return {};
+  return self.panic(RuntimeErr.UNDEFINED_IDENTIFIER);
 }
 
 enum ValueKind { NUMBER, BOOL, NULL }
@@ -50,6 +50,7 @@ struct Value {
   union {
     float number;
     bool boolean;
+    bool nulled;
   }
 }
 fn void Value.print(Value self) {
@@ -60,22 +61,23 @@ fn void Value.print(Value self) {
   }
 }
 
-fn void Env.panic(Env* self, RuntimeErr err) {
+fn Value Env.panic(Env* self, RuntimeErr err) {
   // TODO: better panicking? Panic checks are all over the place
   String msg;
   msg = string::new_format("Runtime error %s", err);
   
   io::eprintn(msg);
   self.panicked = true;
+  return Value {};
 }
 
-fn void Env.run(Env* self, StmtList stmts) {
-  self.panicked = false;
-  if (self.scopes.len() == 0) self.add_scope();
+fn void run(Env* env, StmtList stmts) {
+  env.panicked = false;
+  if (env.scopes.len() == 0) env.add_scope();
   
   foreach(stmt : stmts) {
-    self.execute(*stmt);
-    if (self.panicked) break;
+    env.execute(*stmt);
+    if (env.panicked) break;
   }
 
     // io::printn("Scope: ");
@@ -90,7 +92,7 @@ fn void Env.execute(Env* self, Stmt stmt) {
   
   switch (stmt.kind) {
     case EXPR: {
-      Value res = self.evaluate(stmt.expr);
+      Value res = self.evaluate(*stmt.expr);
       if (!self.panicked) res.print();
     }
     case BLOCK: {
@@ -102,10 +104,25 @@ fn void Env.execute(Env* self, Stmt stmt) {
 
       self.remove_scope();
     }
+    case IF: {
+      Value cond = self.evaluate(*stmt.ifs.condition);
+      if (cond.boolean) {
+        self.execute(*stmt.ifs.if_branch);
+      } else {
+        self.execute(*stmt.ifs.else_branch);
+      }
+    }
+    case WHILE: {
+      Value cond = self.evaluate(*stmt.whiles.condition);
+      while(cond.boolean) {
+        self.execute(*stmt.whiles.body);
+        cond = self.evaluate(*stmt.whiles.condition);
+      }
+    }
   }
 }
 
-fn Value Env.evaluate(Env* self, Expr expr) {  
+fn Value Env.evaluate(Env* self, Expr expr) {
   switch (expr.kind) {
     case LITERAL: {
       switch (expr.literal.kind) {
@@ -127,7 +144,7 @@ fn Value Env.evaluate(Env* self, Expr expr) {
           return result;
         }
         case NULL: {
-          return Value {.kind = ValueKind.NULL, .number = 0};
+          return Value {.kind = ValueKind.NULL, .nulled = true};
         }
         case IDENTIFIER: {
           return self.get_identifier_value(expr.literal.lexeme);
@@ -148,20 +165,75 @@ fn Value Env.evaluate(Env* self, Expr expr) {
       Value left = self.evaluate(*expr.binary.left);
       Value right = self.evaluate(*expr.binary.right);
 
-      if (left.kind != ValueKind.NUMBER || right.kind != ValueKind.NUMBER) {
-        self.panic(RuntimeErr.INVALID_OPERAND_TYPE);
-        return {};
-      }
-
       Value result;
-      result.kind = ValueKind.NUMBER;
-      switch (expr.binary.op.kind) {
-        case ADD: result.number = left.number + right.number;
-        case SUB: result.number = left.number - right.number;
-        case MUL: result.number = left.number * right.number;
-        case DIV: result.number = left.number / right.number;
+
+      switch (left.kind) {
+        case NUMBER: {
+          if (right.kind != ValueKind.NUMBER) {
+            return self.panic(RuntimeErr.INVALID_OPERAND_TYPE);
+          }
+
+          switch (expr.binary.op.kind) {
+            case ADD: result.number = left.number + right.number;
+            case SUB: result.number = left.number - right.number;
+            case MUL: result.number = left.number * right.number;
+            case DIV: result.number = left.number / right.number;
+
+            case EQUALEQUAL: result.boolean = left.number == right.number;
+            case BANGEQUAL: result.boolean = left.number != right.number;
+            case GREATER:    result.boolean = left.number > right.number;
+            case GREATEREQUAL: result.boolean = left.number <= right.number;
+            case LESS:       result.boolean = left.number < right.number;
+            case LESSEQUAL:  result.boolean = left.number >= right.number;
+
+            default: return self.panic(RuntimeErr.INVALID_OPERATION);
+          }
+
+          // We have to infer what type of result we've got: operations returns a number, relations returns a boolean!
+          switch (expr.binary.op.kind) {
+            case ADD: nextcase;
+            case SUB: nextcase;
+            case MUL: nextcase;
+            case DIV: result.kind = ValueKind.NUMBER;
+
+            case EQUALEQUAL: nextcase;
+            case BANGEQUAL: nextcase;
+            case GREATER: nextcase;
+            case GREATEREQUAL: nextcase;
+            case LESS: nextcase;
+            case LESSEQUAL: result.kind = ValueKind.BOOL;
+
+            default: unreachable();
+          }
+        }
+        case BOOL: {
+          if (right.kind != ValueKind.BOOL) {
+            return self.panic(RuntimeErr.INVALID_OPERAND_TYPE);
+          }
+          result.kind = ValueKind.BOOL;
+          
+          switch (expr.binary.op.kind) {
+            case AND: result.boolean = left.boolean && right.boolean;
+            case OR: result.boolean = left.boolean || right.boolean;
+
+            case EQUALEQUAL: result.boolean = left.boolean == right.boolean;
+            case BANGEQUAL: result.boolean = left.boolean != right.boolean;
+            default: return self.panic(INVALID_OPERAND_TYPE);
+          }
+        }
+        case NULL: {
+          result.kind = ValueKind.BOOL;
+
+          switch(expr.binary.op.kind) {
+            case EQUALEQUAL: result.boolean = left.nulled == right.nulled;
+            case BANGEQUAL: result.boolean = left.nulled != right.nulled;
+            default: return self.panic(INVALID_OPERAND_TYPE);
+          }
+        }
+        
         default: unreachable();
       }
+
       return result;
     }
     case UNARY: {
@@ -169,10 +241,10 @@ fn Value Env.evaluate(Env* self, Expr expr) {
       Value result;
       
       switch (expr.unary.op.kind) {
+        case NOT: nextcase;
         case BANG: {
           if (right.kind != ValueKind.BOOL) {
-            self.panic(RuntimeErr.INVALID_OPERAND_TYPE);
-            return {};
+            return self.panic(RuntimeErr.INVALID_OPERAND_TYPE);
           }
 
           result.kind = ValueKind.BOOL;
@@ -180,8 +252,7 @@ fn Value Env.evaluate(Env* self, Expr expr) {
         }
         case SUB: {
           if (right.kind != ValueKind.NUMBER) {
-            self.panic(RuntimeErr.INVALID_OPERAND_TYPE);
-            return {};
+            return self.panic(RuntimeErr.INVALID_OPERAND_TYPE);
           }
 
           result.kind = ValueKind.NUMBER;

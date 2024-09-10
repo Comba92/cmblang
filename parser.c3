@@ -58,7 +58,7 @@ fn Token* Parser.expect_any(Parser* self, TokenKind[] targets, ParserErr err) {
     return self.consume();
 }
 
-fn void Parser.panic(Parser* self, ParserErr err) {
+fn Expr* Parser.panic(Parser* self, ParserErr err) {
     String msg;
     if (self.is_at_end()) { msg = string::new_format("Parser error %s at end", err); }
 	else { 
@@ -74,6 +74,8 @@ fn void Parser.panic(Parser* self, ParserErr err) {
     io::eprintn(msg);
     self.index = self.tokens.len();
     self.panicked = true;
+
+    return {};
 }
 
 fn StmtList parse(TokenList tokens) {
@@ -93,7 +95,7 @@ fn Stmt* stmt(Parser* parser) {
         return mem::new(Stmt, *block(parser));
     }
 
-    return mem::new(Stmt, Stmt {.kind = StmtKind.EXPR, .expr = *expr(parser)});
+    return mem::new(Stmt, Stmt {.kind = StmtKind.EXPR, .expr = expr(parser)});
 }
 
 fn Stmt* block(Parser* parser) {
@@ -106,7 +108,7 @@ fn Stmt* block(Parser* parser) {
     }
 
     Token* right = parser.expect(TokenKind.RIGHTBRACE, ParserErr.UNTERMINATED_BLOCK);
-    BlockStmt block = BlockStmt {.left = left, .right = right, .body = body};
+    BlockStmt* block = mem::new(BlockStmt, BlockStmt {.left = left, .right = right, .body = body});
     return mem::new(Stmt, Stmt {.kind = StmtKind.BLOCK, .block = block});
 }
 
@@ -115,13 +117,12 @@ fn Expr* expr(Parser* parser) {
 }
 
 fn Expr* assign(Parser* parser) {
-    Expr* left = equality(parser);
+    Expr* left = logical_or(parser);
 
     if (parser.match(TokenKind.EQUAL)) {
         if (left.kind != ExprKind.LITERAL
         || left.literal.kind != TokenKind.IDENTIFIER) {
-            parser.panic(ParserErr.INVALID_ASSIGN_TARGET);
-            return mem::new(Expr, Expr {});
+            return parser.panic(ParserErr.INVALID_ASSIGN_TARGET);
         }
 
         Token* equal = parser.consume();
@@ -131,6 +132,16 @@ fn Expr* assign(Parser* parser) {
     }
     
     return left;
+}
+
+fn Expr* logical_or(Parser* parser) {
+    TokenKind[*] ops = {TokenKind.OR};
+    return binary(parser, &ops, &logical_and);
+}
+
+fn Expr* logical_and(Parser* parser) {
+    TokenKind[*] ops = {TokenKind.AND};
+    return binary(parser, &ops, &equality);
 }
 
 fn Expr* equality(Parser* parser) {
@@ -184,7 +195,8 @@ fn Expr* binary(Parser* parser, TokenKind[] ops, GrammarFn next) {
 fn Expr* unary(Parser* parser) {
     TokenKind[*] ops = {
         TokenKind.BANG, 
-        TokenKind.SUB
+        TokenKind.NOT,
+        TokenKind.SUB,
     };
 
     if (!parser.match_any(&ops)) {
@@ -216,9 +228,9 @@ fn Expr* primary(Parser* parser) {
         case IDENTIFIER: {
             return mem::new(Expr, Expr {.kind = ExprKind.LITERAL, .literal = token});
         }
+
         default: {
-            parser.panic(ParserErr.INVALID_TOKEN);
-            return mem::new(Expr, Expr {});
+            return parser.panic(ParserErr.INVALID_TOKEN);
         }
     }
 }

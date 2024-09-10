@@ -5,18 +5,31 @@ import parser;
 
 import std::io;
 
-enum StmtKind { EXPR, BLOCK }
+enum StmtKind { EXPR, BLOCK, IF, WHILE }
 struct Stmt {
     StmtKind kind;
     union {
-        Expr expr;
-        BlockStmt block;
+        Expr* expr;
+        BlockStmt* block;
+        IfStmt* ifs;
+        WhileStmt* whiles;
     }
 }
 
 struct BlockStmt {
     Token* left, right;
     StmtList body;
+}
+
+struct IfStmt {
+    Expr* condition;
+    Stmt* if_branch;
+    Stmt* else_branch;
+}
+
+struct WhileStmt {
+    Expr* condition;
+    Stmt* body;
 }
 
 struct GroupingExpr {

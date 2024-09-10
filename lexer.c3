@@ -9,10 +9,12 @@ enum TokenKind {
 	INVALID,
 	NUMBER, IDENTIFIER,
 	STRING, BOOL, NULL,
-	IF_KEY,
+	IF_KEY, ELSE_KEY, WHILE_KEY, FOR_KEY,
 	ADD, SUB, MUL, DIV,
-	EQUAL, EQUALEQUAL, BANG, BANGEQUAL, LESS, LESSEQUAL, GREATER, GREATEREQUAL, COMMA,
-	LEFTPAREN, RIGHTPAREN, LEFTBRACKET, RIGHTBRACKET, LEFTBRACE, RIGHTBRACE,
+	AND, OR, NOT,
+	EQUAL, EQUALEQUAL, BANG, BANGEQUAL,
+	LESS, LESSEQUAL, GREATER, GREATEREQUAL,
+	COMMA, LEFTPAREN, RIGHTPAREN, LEFTBRACKET, RIGHTBRACKET, LEFTBRACE, RIGHTBRACE,
 }
 fn bool TokenKind.match_any(TokenKind self, TokenKind[] kinds) {
 	foreach(kind : kinds) {
@@ -23,7 +25,7 @@ fn bool TokenKind.match_any(TokenKind self, TokenKind[] kinds) {
 }
 
 const char[][*] KEYWORDS = {
-	"true", "false", "null", "if" 
+	"true", "false", "and", "or", "not", "null", "if", "else", "while", "for"
 };
 
 struct Location {
@@ -105,6 +107,12 @@ fn TokenList scan(char[] input) {
 			continue; 
 		}
 
+		if (c == '/' && lexer.eat_if('/')) {
+			// FIXME: not sure if this will work with files
+			while (!lexer.is_at_end()) { lexer.eat(); }
+			continue;
+		}
+
 		Location start = lexer.loc;
 		lexer.eat();
 		TokenKind kind = TokenKind.INVALID;
@@ -132,7 +140,6 @@ fn TokenList scan(char[] input) {
 				// TODO: string lexing here
 				unreachable();
 			}
-
 
 			default: {
 				if (c.is_digit()) {
@@ -198,8 +205,16 @@ fn TokenKind scan_keyword(char[] maybe_keyword) {
 		case "true": nextcase;
 		case "false": return TokenKind.BOOL;
 
+		case "and": return TokenKind.AND;
+		case "or": return TokenKind.OR;
+		case "not": return TokenKind.NOT;
+
 		case "null": return TokenKind.NULL;
+
 		case "if": return TokenKind.IF_KEY;
+		case "else": return TokenKind.ELSE_KEY;
+		case "while": return TokenKind.WHILE_KEY;
+		case "for": return TokenKind.FOR_KEY;
 
 		default: unreachable();
 	}

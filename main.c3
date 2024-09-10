@@ -17,12 +17,9 @@ fn void! repl() {
 }
 
 fn void interpret(String input, Env* env) {
-    DynamicArenaAllocator arena;
-    arena.init(2048, allocator::heap());
-    
     TokenList tokens = lexer::scan(input);
     StmtList stmts = parser::parse(tokens);
-    env.run(stmts);
+    eval::run(env, stmts);
 }
 
 fn void main() {
