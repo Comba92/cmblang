@@ -43,6 +43,20 @@ fn Value Env.get_identifier_value(Env* self, char[] id) {
 
   return self.panic(RuntimeErr.UNDEFINED_IDENTIFIER);
 }
+fn Value Env.set_identifier_value(Env* self, char[] id, Value val) {
+  int current_scope = (int)self.scopes.len()-1;
+  while (current_scope >= 0) {
+    Scope* scope = self.scopes.get(current_scope);
+    if (scope.has_key(id)) {
+      scope.set(id, val);
+      val.print();
+      return val;
+    }
+    current_scope -= 1;
+  }
+
+  return self.panic(RuntimeErr.UNDEFINED_IDENTIFIER);
+}
 
 enum ValueKind { NUMBER, BOOL, NULL }
 struct Value {
@@ -93,6 +107,9 @@ fn void Env.execute(Env* self, Stmt stmt) {
   switch (stmt.kind) {
     case EXPR: {
       Value res = self.evaluate(*stmt.expr);
+    }
+    case PRINT: {
+      Value res = self.evaluate(*stmt.print.expr);
       if (!self.panicked) res.print();
     }
     case VAR: {
@@ -118,9 +135,8 @@ fn void Env.execute(Env* self, Stmt stmt) {
       }
     }
     case WHILE: {
-      io::printn("executing while...");
       Value cond = self.evaluate(*stmt.whiles.condition);
-      while(cond.boolean) {
+      while(!cond.boolean) {
         self.execute(*stmt.whiles.body);
         cond = self.evaluate(*stmt.whiles.condition);
       }
@@ -159,11 +175,9 @@ fn Value Env.evaluate(Env* self, Expr expr) {
       }
     }
     case ASSIGN: {
-      // FIXME: currently assignment only updates a variable in its current scope (if it doesnt exists it creates one)
       char[] name = expr.assign.identifier.literal.lexeme;
-      self.get_identifier_value(name);
       Value result = self.evaluate(*expr.assign.value);
-      self.current_scope().set(name, result);
+      self.set_identifier_value(name, result);
       return result;
     }
     case GROUPING: {

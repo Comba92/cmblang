@@ -98,6 +98,9 @@ fn Stmt* stmt(Parser* parser) {
     if (parser.match(TokenKind.VAR_KEY)) {
         return mem::new(Stmt, *vars(parser));
     }
+    if (parser.match(TokenKind.PRINT_KEY)) {
+        return mem::new(Stmt, *print(parser));
+    }
     if (parser.match(TokenKind.LEFTBRACE)) {
         return mem::new(Stmt, *block(parser));
     }
@@ -109,6 +112,14 @@ fn Stmt* stmt(Parser* parser) {
     }
 
     return mem::new(Stmt, Stmt {.kind = StmtKind.EXPR, .expr = expr(parser)});
+}
+
+fn Stmt* print(Parser* parser) {
+    parser.consume();
+    Expr* value = expr(parser);
+
+    PrintStmt* print = mem::new(PrintStmt, PrintStmt {.expr = value});
+    return mem::new(Stmt, Stmt {.kind = StmtKind.PRINT, .print = print});
 }
 
 fn Stmt* vars(Parser* parser) {

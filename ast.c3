@@ -5,16 +5,21 @@ import parser;
 
 import std::io;
 
-enum StmtKind { EXPR, BLOCK, VAR, IF, WHILE }
+enum StmtKind { EXPR, PRINT, BLOCK, VAR, IF, WHILE }
 struct Stmt {
     StmtKind kind;
     union {
         Expr* expr;
         VarStmt* vars;
+        PrintStmt* print;
         BlockStmt* block;
         IfStmt* ifs;
         WhileStmt* whiles;
     }
+}
+
+struct PrintStmt {
+    Expr* expr;
 }
 
 struct VarStmt {
