@@ -56,10 +56,12 @@ As usual:
 
 # TODO
 - REPL Qol
-- Better Typing, why expression only has LITERAL and no types?
+- Better Typing, why expression only has LITERAL and no types? (Why is this a problem??)
 - Run a program from a file
 - Better runtime errors
 - String type
 - Lists and Maps
+- Fix list indexing grammar precedence
+- List foreach
 - Functions
-- Better memory mangament -- no freeing of overwrittern values!!
+- Better memory mangament -- at the moment there is no freeing of overwrittern values!!
