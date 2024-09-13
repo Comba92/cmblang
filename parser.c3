@@ -16,6 +16,7 @@ fault ParserErr {
     MISSING_VAR_INITIALIZATION,
     MISSING_COMMA_IN_LISTING,
     UNTERMINATED_LIST_LITERAL,
+    UNTERMINATED_INDEXING,
 }
 
 struct Parser {
@@ -259,6 +260,7 @@ fn Expr* unary(Parser* parser) {
         TokenKind.BANG, 
         TokenKind.NOT,
         TokenKind.SUB,
+        TokenKind.HASH,
     };
 
     if (!parser.match_any(&ops)) {
@@ -310,7 +312,16 @@ fn Expr* primary(Parser* parser) {
         case BOOL: nextcase;
         case NUMBER: nextcase;
         case STRING: nextcase;
-        case IDENTIFIER: {
+        case IDENTIFIER: { 
+            // List indexing
+            if (parser.match(TokenKind.LEFTBRACKET)) {
+                parser.consume();
+                Expr* idx = expr(parser);
+                parser.expect(TokenKind.RIGHTBRACKET, ParserErr.UNTERMINATED_INDEXING);
+                IndexingExpr indexing = {.identifier = token, .index = idx};
+                return mem::new(Expr, Expr {.kind = ExprKind.INDEXING, .indexing = indexing});
+            }
+
             return mem::new(Expr, Expr {.kind = ExprKind.LITERAL, .literal = token});
         }
 

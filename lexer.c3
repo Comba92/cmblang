@@ -14,7 +14,8 @@ enum TokenKind {
 	AND, OR, NOT,
 	EQUAL, EQUALEQUAL, BANG, BANGEQUAL,
 	LESS, LESSEQUAL, GREATER, GREATEREQUAL,
-	COMMA, LEFTPAREN, RIGHTPAREN, LEFTBRACKET, RIGHTBRACKET, LEFTBRACE, RIGHTBRACE,
+	COMMA, HASH, 
+	LEFTPAREN, RIGHTPAREN, LEFTBRACKET, RIGHTBRACKET, LEFTBRACE, RIGHTBRACE,
 }
 fn bool TokenKind.match_any(TokenKind self, TokenKind[] kinds) {
 	foreach(kind : kinds) {
@@ -133,6 +134,8 @@ fn TokenList scan(char[] input) {
 			case '-': kind = TokenKind.SUB;
 			case '*': kind = TokenKind.MUL;
 			case '/': kind = TokenKind.DIV;
+
+			case '#': kind = TokenKind.HASH;
 			case ',': kind = TokenKind.COMMA;
 
 			case '=': {

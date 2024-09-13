@@ -68,13 +68,18 @@ struct ListExpr {
     ExprList exprs;
     Token* end;
 }
+struct IndexingExpr {
+    Token* identifier;
+    Expr* index;
+}
 
-enum ExprKind { LITERAL, LIST, GROUPING, BINARY, UNARY, ASSIGN }
+enum ExprKind { LITERAL, LIST, INDEXING, GROUPING, BINARY, UNARY, ASSIGN }
 struct Expr {
     ExprKind kind;
     union {
         Token* literal;
         ListExpr list;
+        IndexingExpr indexing;
         GroupingExpr grouping;
         BinaryExpr binary;
         UnaryExpr unary;

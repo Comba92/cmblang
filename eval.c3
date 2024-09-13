@@ -20,7 +20,9 @@ struct Env {
 fault RuntimeErr {
   INVALID_OPERAND_TYPE,
   INVALID_OPERATION,
-  UNDEFINED_IDENTIFIER
+  UNDEFINED_IDENTIFIER,
+  NEGATIVE_INDEXING,
+  INDEXING_OUT_OF_BOUNDS,
 }
 
 fn void Env.add_scope(Env* self) {
@@ -198,6 +200,13 @@ fn Value Env.evaluate(Env* self, Expr expr) {
       result.list = list;
       return result;
     }
+    case INDEXING: {
+      Value result = self.get_identifier_value(expr.indexing.identifier.lexeme);
+      Value idx = self.evaluate(*expr.indexing.index);
+      if (idx.number < 0) return self.panic(RuntimeErr.NEGATIVE_INDEXING);
+      if (idx.number >= result.list.len()) return self.panic(RuntimeErr.INDEXING_OUT_OF_BOUNDS);
+      return *result.list.get((usz) idx.number);
+    }
     case ASSIGN: {
       char[] name = expr.assign.identifier.literal.lexeme;
       Value result = self.evaluate(*expr.assign.value);
@@ -303,6 +312,14 @@ fn Value Env.evaluate(Env* self, Expr expr) {
 
           result.kind = ValueKind.NUMBER;
           result.number = -right.number;
+        }
+        case HASH: {
+          if (right.kind != ValueKind.LIST) {
+            return self.panic(RuntimeErr.INVALID_OPERAND_TYPE);
+          }
+
+          result.kind = ValueKind.NUMBER;
+          result.number = right.list.len();
         }
         default: unreachable();
       }
