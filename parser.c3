@@ -4,8 +4,6 @@ import lexer;
 import ast;
 
 import std::io;
-import std::collections::list;
-def StmtList = List(<Stmt*>);
 
 fault ParserErr {
     INVALID_TOKEN,
@@ -15,7 +13,9 @@ fault ParserErr {
     MISSING_IF_PARENTHESIS,
     UNTERMINATED_IF_CONDITION,
     INVALID_VAR_NAME,
-    MISSING_VAR_INITIALIZATION
+    MISSING_VAR_INITIALIZATION,
+    MISSING_COMMA_IN_LISTING,
+    UNTERMINATED_LIST_LITERAL,
 }
 
 struct Parser {
@@ -282,6 +282,29 @@ fn Expr* primary(Parser* parser) {
             Token* right = parser.expect(TokenKind.RIGHTPAREN, ParserErr.UNTERMINATED_GROUPING);
             GroupingExpr group = {.left = left, .expr = e, .right = right};
             return mem::new(Expr, Expr {.kind = ExprKind.GROUPING, .grouping = group});
+        }
+        case LEFTBRACKET: {
+            // empty list
+            if (parser.match(TokenKind.RIGHTBRACKET)) {
+                Token* end = parser.consume();
+                ListExpr list = ListExpr {.start = token, .end = end, .exprs = {}};
+                return mem::new(Expr, Expr {.kind = ExprKind.LIST, .list = list});
+            }
+
+            ExprList exprs;
+            while (!parser.is_at_end()) {
+                exprs.push(expr(parser));
+
+                if (parser.match(TokenKind.RIGHTBRACKET)) {
+                    Token* end = parser.consume();
+                    ListExpr list = ListExpr {.start = token, .end = end, .exprs = exprs};
+                    return mem::new(Expr, Expr {.kind = ExprKind.LIST, .list = list});
+                }
+
+                parser.expect(TokenKind.COMMA, ParserErr.MISSING_COMMA_IN_LISTING);
+            }
+
+            return parser.panic(ParserErr.UNTERMINATED_LIST_LITERAL);
         }
         case NULL: nextcase;
         case BOOL: nextcase;

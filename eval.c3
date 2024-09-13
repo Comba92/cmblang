@@ -10,6 +10,7 @@ import std::collections::map;
 
 def Scope = HashMap(<char[], Value>);
 def ScopeList = List(<Scope*>);
+def ValueList = List(<Value*>);
 
 struct Env {
   ScopeList scopes;
@@ -49,7 +50,6 @@ fn Value Env.set_identifier_value(Env* self, char[] id, Value val) {
     Scope* scope = self.scopes.get(current_scope);
     if (scope.has_key(id)) {
       scope.set(id, val);
-      val.print();
       return val;
     }
     current_scope -= 1;
@@ -58,21 +58,35 @@ fn Value Env.set_identifier_value(Env* self, char[] id, Value val) {
   return self.panic(RuntimeErr.UNDEFINED_IDENTIFIER);
 }
 
-enum ValueKind { NUMBER, BOOL, NULL }
+enum ValueKind { NUMBER, BOOL, NULL, LIST }
 struct Value {
   ValueKind kind;
   union {
     float number;
     bool boolean;
     bool nulled;
+    ValueList list;
+  }
+}
+fn void Value.debug(Value self) {
+  switch (self.kind) {
+    case NULL: { io::print("null"); }
+    case NUMBER: { io::printf("%f", self.number); }
+    case BOOL: { io::print(self.boolean); }
+    case LIST: {
+      // TODO: no comma at end
+      io::print("[ ");
+      for (int i=0; i<self.list.len(); i++) {
+        self.list[i].debug();
+        io::print(", ");
+      }
+      io::print(" ]");
+    }
   }
 }
 fn void Value.print(Value self) {
-  switch (self.kind) {
-    case NULL: { io::printn("null"); }
-    case NUMBER: { io::printfn("%f", self.number); }
-    case BOOL: { io::printn(self.boolean); }
-  }
+  self.debug();
+  io::printn();
 }
 
 fn Value Env.panic(Env* self, RuntimeErr err) {
@@ -115,7 +129,6 @@ fn void Env.execute(Env* self, Stmt stmt) {
     case VAR: {
       Value res = self.evaluate(*stmt.vars.value);
       self.current_scope().set(stmt.vars.name.lexeme, res);
-      res.print();
     }
     case BLOCK: {
       self.add_scope();
@@ -173,6 +186,17 @@ fn Value Env.evaluate(Env* self, Expr expr) {
         }
         default: unreachable();
       }
+    }
+    case LIST: {
+      ValueList list;
+      foreach(e : expr.list.exprs) {
+        Value* res = mem::new(Value, self.evaluate(*e));
+        list.push(res);
+      }
+      Value result;
+      result.kind = ValueKind.LIST;
+      result.list = list;
+      return result;
     }
     case ASSIGN: {
       char[] name = expr.assign.identifier.literal.lexeme;

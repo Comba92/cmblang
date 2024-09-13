@@ -70,6 +70,10 @@ fn char Lexer.current(Lexer self) {
 	if (self.is_at_end()) return '\0';
 	return self.text[self.loc.index];
 }
+fn char Lexer.peek(Lexer self) {
+	if (self.loc.index+1 >= self.text.len) return '\0';
+	return self.text[self.loc.index+1];
+}
 fn void Lexer.eat(Lexer* self) {
 	if (self.is_at_end()) return;
 	if (self.current() == '\n') {
@@ -108,7 +112,7 @@ fn TokenList scan(char[] input) {
 			continue; 
 		}
 
-		if (c == '/' && lexer.eat_if('/')) {
+		if (c == '/' && lexer.peek() == '/') {
 			// FIXME: not sure if this will work with files
 			while (!lexer.is_at_end()) { lexer.eat(); }
 			continue;
@@ -121,12 +125,15 @@ fn TokenList scan(char[] input) {
 		switch (c) {
 			case '(': kind = TokenKind.LEFTPAREN;
 			case ')': kind = TokenKind.RIGHTPAREN;
+			case '[': kind = TokenKind.LEFTBRACKET;
+			case ']': kind = TokenKind.RIGHTBRACKET;
 			case '{': kind = TokenKind.LEFTBRACE;
 			case '}': kind = TokenKind.RIGHTBRACE;
 			case '+': kind = TokenKind.ADD;
 			case '-': kind = TokenKind.SUB;
 			case '*': kind = TokenKind.MUL;
 			case '/': kind = TokenKind.DIV;
+			case ',': kind = TokenKind.COMMA;
 
 			case '=': {
 				if (lexer.eat_if('=')) { kind = TokenKind.EQUALEQUAL; }

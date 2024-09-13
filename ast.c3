@@ -4,6 +4,9 @@ import lexer;
 import parser;
 
 import std::io;
+import std::collections::list;
+def ExprList = List(<Expr*>);
+def StmtList = List(<Stmt*>);
 
 enum StmtKind { EXPR, PRINT, BLOCK, VAR, IF, WHILE }
 struct Stmt {
@@ -60,12 +63,18 @@ struct AssignExpr {
   Token* equal;
   Expr* value;
 }
+struct ListExpr {
+    Token* start;
+    ExprList exprs;
+    Token* end;
+}
 
-enum ExprKind { LITERAL, GROUPING, BINARY, UNARY, ASSIGN }
+enum ExprKind { LITERAL, LIST, GROUPING, BINARY, UNARY, ASSIGN }
 struct Expr {
     ExprKind kind;
     union {
         Token* literal;
+        ListExpr list;
         GroupingExpr grouping;
         BinaryExpr binary;
         UnaryExpr unary;
