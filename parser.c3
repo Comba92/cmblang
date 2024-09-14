@@ -314,7 +314,8 @@ fn Expr* primary(Parser* parser) {
         case STRING: nextcase;
         case IDENTIFIER: { 
             // List indexing
-            if (parser.match(TokenKind.LEFTBRACKET)) {
+            while (!parser.is_at_end()) {
+                if (!parser.match(TokenKind.LEFTBRACKET)) { break; }
                 parser.consume();
                 Expr* idx = expr(parser);
                 parser.expect(TokenKind.RIGHTBRACKET, ParserErr.UNTERMINATED_INDEXING);

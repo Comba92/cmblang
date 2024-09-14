@@ -51,6 +51,13 @@ fn Value Env.set_identifier_value(Env* self, char[] id, Value val) {
   while (current_scope >= 0) {
     Scope* scope = self.scopes.get(current_scope);
     if (scope.has_key(id)) {
+      Value! to_free = scope.get(id);
+      if (try to_free) {
+        if (to_free.kind == ValueKind.LIST) {
+          to_free.list.free();
+        }
+      }
+
       scope.set(id, val);
       return val;
     }
@@ -70,25 +77,31 @@ struct Value {
     ValueList list;
   }
 }
-fn void Value.debug(Value self) {
+fn String Value.stringify(Value self) {
   switch (self.kind) {
-    case NULL: { io::print("null"); }
-    case NUMBER: { io::printf("%f", self.number); }
-    case BOOL: { io::print(self.boolean); }
+    case NULL: { return "null"; }
+    case NUMBER: { return string::new_format("%f", self.number); }
+    case BOOL: { return string::new_format("%b", self.boolean); }
     case LIST: {
       // TODO: no comma at end
-      io::print("[ ");
+      DString str = dstring::new();
+      str.append("[ ");
       for (int i=0; i<self.list.len(); i++) {
-        self.list[i].debug();
-        io::print(", ");
+        str.append(self.list[i].stringify());
+        str.append(", ");
       }
-      io::print(" ]");
+      str.delete(str.len()-2, 2);
+      str.append(" ]");
+      String ret = str.copy_str();
+      str.free();
+      return ret;
     }
   }
 }
 fn void Value.print(Value self) {
-  self.debug();
-  io::printn();
+  String s = self.stringify();
+  io::printn(s);
+  s.free();
 }
 
 fn Value Env.panic(Env* self, RuntimeErr err) {
