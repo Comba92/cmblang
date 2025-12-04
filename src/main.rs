@@ -1,6 +1,50 @@
-use std::{error, fs};
+use std::{error::{self, Error}, fmt, fs};
 
-pub type Err = Box<dyn error::Error>;
+pub type Err = FrontendErr;
+
+#[test]
+fn partition() {
+  let vec = (0..10).step_by(2).collect::<Vec<_>>();
+  let res = vec.binary_search(&1);
+  println!("{res:?}");
+}
+
+#[derive(Debug, Clone)]
+pub struct FrontendErr {
+  msg: String,
+  span: lexer::Span,
+  token: String,
+  column: usize,
+  line: usize,
+}
+impl FrontendErr {
+  pub fn new(msg: String, span: lexer::Span, lexer: &lexer::Lexer) -> Self {
+    let line = match lexer.line_offsets.binary_search(&span.start) {
+      // token starts exactly at line, return as is
+      Ok(idx) => idx,
+      // token starts inside line, search returned next line
+      // 0 shouldn't be returned so it is safe to subtract 1
+      Err(idx) => idx - 1,
+    };
+
+    let column = (span.start - lexer.line_offsets[line]) as usize;
+    
+    Self {
+      msg,
+      token: span.slice(lexer.src).to_owned(),
+      span,
+      line,
+      column
+    }
+  }
+}
+
+impl fmt::Display for FrontendErr {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(f, "{} at token: '{}', line: {}, column: {}", self.msg, self.token, self.line, self.column)
+  }
+}
+impl error::Error for FrontendErr {}
 
 trait CursorIter<Inner, Mapped> {
   fn peek(&self) -> Mapped { self.peek_nth(0) }
@@ -23,11 +67,11 @@ trait CursorIter<Inner, Mapped> {
 mod lexer;
 mod parser;
 
-fn main() -> Result<(), Err>{
+fn main() -> Result<(), Box<dyn Error>> {
   let src = fs::read_to_string("test.cmb")?;
-  let lexer = lexer::tokenize(&src);
-  lexer.tokens.iter().for_each(|t| println!("{t:?}"));
+
   let parser = parser::parse(&src);
+  parser.tokens.iter().for_each(|t| println!("{t:?}"));
   parser.exprs.iter().for_each(|e| println!("{e:?}"));
   parser.stmts.iter().for_each(|s| println!("{s:?}"));
 

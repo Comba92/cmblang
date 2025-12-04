@@ -14,11 +14,12 @@ static KEYWORDS: LazyLock<HashMap<String, KeywordKind>> = LazyLock::new(|| {
 
 #[derive(Debug, Default, Clone)]
 pub struct Span {
-  start: u16,
-  end: u16,
+  pub start: u32,
+  pub end: u32,
 }
 impl Span {
-  pub fn len(&self) -> u16 { self.end - self.start }
+  pub fn len(&self) -> u32 { self.end - self.start }
+  pub fn slice<'a, 'b>(&'a self, src: &'b str) -> &'b str { &src[self.start as usize .. self.end as usize] }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumIter, strum::Display)]
@@ -31,13 +32,11 @@ pub enum KeywordKind {
   Int, Float, Bool,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TokenKind {
-  #[default]
-  Err,
+  Err(char),
 
   Assign,
-  Decl,
   Comma,
   Dot,
   Colon,
@@ -83,14 +82,20 @@ impl TokenKind {
   }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct Token {
   pub kind: TokenKind,
   pub info: Span,
 }
+impl Token {
+  pub fn to_err<S: Into<String>>(&self, msg: S, lexer: &Lexer) -> crate::Err {
+    crate::FrontendErr::new(msg.into(), self.info.clone(), lexer)
+  }
+}
 
-pub struct Lexer {
-  pub line_offsets: Vec<u16>,
+pub struct Lexer<'a> {
+  pub src: &'a str,
+  pub line_offsets: Vec<u32>,
   pub tokens: Vec<Token>,
 }
 
@@ -110,14 +115,6 @@ impl<'a> CursorIter<u8, char> for Cursor<'a> {
 }
 
 impl<'a> Cursor<'a> {
-//   pub fn peek(&self) -> char {
-//     self.peek_nth(0)
-//   }
-
-//   pub fn peek_nth(&self, nth: usize) -> char {
-//     self.bytes.get(self.curr + nth).copied().unwrap_or_default() as char
-//   }
-
   pub fn match2_or1(&mut self, target: char, m: TokenKind, o: TokenKind) -> TokenKind  {
     if self.peek_nth(1) == target {
       // eat second char
@@ -127,13 +124,10 @@ impl<'a> Cursor<'a> {
       o
     }
   }
-
-//   pub fn slice(&self) -> &[u8] { &self.bytes[self.curr..] }
-//   pub fn at_end(&self) -> bool { self.curr >= self.bytes.len() }
 }
 
 pub fn tokenize(src: &str) -> Lexer {
-  let mut lexer = Lexer { tokens: Vec::new(), line_offsets: Vec::new() };
+  let mut lexer = Lexer { src, tokens: Vec::new(), line_offsets: vec![0] };
   let mut cursor = Cursor {bytes: src.as_bytes(), curr: 0};
   
   'start: while !cursor.at_end() {
@@ -162,10 +156,10 @@ pub fn tokenize(src: &str) -> Lexer {
 
       ',' => TokenKind::Comma,
       '.' => TokenKind::Dot,
+      ':' => TokenKind::Colon,
       ';' => TokenKind::Semicolon,
       
       '-' => cursor.match2_or1('>', TokenKind::Arrow, TokenKind::Minus),
-      ':' => cursor.match2_or1('=', TokenKind::Decl, TokenKind::Colon),
       '=' => cursor.match2_or1('=', TokenKind::Eq, TokenKind::Assign),
       '!' => cursor.match2_or1('=', TokenKind::Bang, TokenKind::NotEq),
       '<' => cursor.match2_or1('=', TokenKind::LessEq, TokenKind::Less),
@@ -214,17 +208,17 @@ pub fn tokenize(src: &str) -> Lexer {
       }
 
       '\n' => {
-        lexer.line_offsets.push(start as u16);
         cursor.advance();
+        lexer.line_offsets.push(cursor.curr() as u32);
         continue 'start;
       }
 
-      _ => TokenKind::Err,
+      _ => TokenKind::Err(c),
     };
 
     let t = Token {
       kind,
-      info: Span { start: start as u16, end: (start + len) as u16 }
+      info: Span { start: start as u32, end: (start + len) as u32 }
     };
 
     lexer.tokens.push(t);

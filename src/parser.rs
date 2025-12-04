@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use crate::{CursorIter, Err, lexer::*};
+use crate::{CursorIter, Err, FrontendErr, lexer::*};
 
 #[derive(Debug)]
 pub struct TokenId(usize);
@@ -76,9 +76,9 @@ pub struct TypeInfo {
   size: usize,
 }
 
-pub struct Parser<'a, 'b> {
+pub struct Parser<'a> {
   src: &'a str,
-  cursor: Cursor<'b>,
+  cursor: Cursor<'a>,
 
   exprs: Vec<Expr>,
   stmts: Vec<Stmt>,
@@ -86,10 +86,10 @@ pub struct Parser<'a, 'b> {
 
   top_lvl: Vec<StmtId>,
 
-  had_errors: bool,
+  errors: Vec<FrontendErr>,
 }
-impl<'a, 'b> Parser<'a, 'b> {
-  pub fn new(src: &'a str, tokens: &'b [Token]) -> Self {
+impl<'a> Parser<'a> {
+  pub fn new(src: &'a str, lexer: &'a Lexer) -> Self {
     let mut types = HashMap::new();
     types.insert(Type::Untyped, 0.into());
     types.insert(Type::Void, 1.into());
@@ -99,15 +99,18 @@ impl<'a, 'b> Parser<'a, 'b> {
 
     Parser {
       src,
-      cursor: Cursor { tokens, curr: 0, panic: false },
+      cursor: Cursor { lexer, curr: 0 },
       exprs: Vec::new(),
       stmts: Vec::new(),
       types,
 
       top_lvl: Vec::new(),
-
-      had_errors: false,
+      errors: Vec::new(),
     }
+  }
+
+  pub fn err<S: Into<String>>(&self, msg: S, t: &Token) -> Err {
+    t.to_err(msg, self.cursor.lexer)
   }
 
   pub fn push_expr(&mut self, e: Expr) -> ExprId {
@@ -125,6 +128,7 @@ impl<'a, 'b> Parser<'a, 'b> {
     TypeId(self.exprs.len()-1)
   }
 
+  
   fn parse_expr(&mut self, prec_lvl: i8) -> Result<ExprId, Err> {
     let t = self.cursor.eat();
     let id = self.cursor.prev_id();
@@ -147,11 +151,11 @@ impl<'a, 'b> Parser<'a, 'b> {
 
       ParenL => {
         let lhs = self.parse_expr(0)?;
-        self.cursor.eat_match(TokenKind::ParenR, "unclosed parenthesis".into())?;
+        self.cursor.eat_match(TokenKind::ParenR, "unclosed parenthesis", &t)?;
         lhs
       }
 
-      _ => return Result::Err("invalid expression".into())
+      _ => return Result::Err(self.err("invalid expression", &t)),
     };
 
     while !self.cursor.at_end() {
@@ -184,16 +188,20 @@ impl<'a, 'b> Parser<'a, 'b> {
   }
 
   fn parse_decl(&mut self, name: TokenId) -> Result<StmtId, Err> {
-    // eat ':='
+    // eat ':'
     self.cursor.advance();
+
+    let ty_id = if self.cursor.peek().kind == TokenKind::Assign {
+      self.cursor.advance();
+      UNTYPED_ID
+    } else {
+      todo!("parse type")
+    };
+
     let rhs = self.parse_expr(0)?;
 
-    let stmt = self.push_stmt(Stmt::Decl { name, ty: UNTYPED_ID, rhs });
+    let stmt = self.push_stmt(Stmt::Decl { name, ty: ty_id, rhs });
     Ok(stmt)
-  }
-
-  fn parse_decl_annot(&mut self, name: TokenId) -> Result<StmtId, Err> {
-    todo!()
   }
 
   pub fn parse_stmt(&mut self) -> Result<StmtId, Err> {
@@ -205,7 +213,6 @@ impl<'a, 'b> Parser<'a, 'b> {
         let op = self.cursor.peek();
         match op.kind {
           TokenKind::Assign => self.parse_assign(lhs)?,
-          TokenKind::Decl => self.parse_decl(tok_id)?,
           TokenKind::Colon => self.parse_decl(tok_id)?,
           _ => {
             let id = self.parse_expr(0)?;
@@ -258,18 +265,17 @@ fn infix_lvl(kind: TokenKind) -> (i8, i8) {
 }
 
 struct Cursor<'a> {
-  tokens: &'a [Token],
+  lexer: &'a Lexer<'a>,
   curr: usize,
-  pub panic: bool,
 }
 impl<'a> CursorIter<Token, Token> for Cursor<'a> {
   fn peek_nth(&self, nth: usize) -> Token {
-    self.tokens.get(self.curr() + nth)
+    self.lexer.tokens.get(self.curr() + nth)
     .cloned()
-    .unwrap_or_else(|| Token { kind: TokenKind::Err, info: Span::default() } )
+    .unwrap_or_else(|| Token { kind: TokenKind::Err('\0'), info: Span::default() } )
   }
 
-  fn start(&self) -> &[Token] { self.tokens }
+  fn start(&self) -> &[Token] { &self.lexer.tokens }
   fn curr(&self) -> usize { self.curr }
   fn curr_mut(&mut self) -> &mut usize { &mut self.curr }
 }
@@ -282,12 +288,14 @@ pub struct Ast {
 
 pub fn parse(src: &str) -> Ast {
   let lexer = tokenize(src);
-  let mut p = Parser::new(src, &lexer.tokens);
+  let mut p = Parser::new(src, &lexer);
 
   while !p.cursor.at_end() {
     let stmt = p.parse_stmt();
+
     if let Err(e) = stmt {
-      eprintln!("{e}");
+      eprintln!("[PARSE ERR] {e}");
+      p.errors.push(e);
       p.cursor.eat_until_safe();
     }
   }
@@ -304,9 +312,11 @@ impl<'a> Cursor<'a> {
     (self.peek().kind == kind).then(|| self.eat())
   }
 
-  fn eat_match(&mut self, target: TokenKind, err: Err) -> Result<Token, Err> {
+  fn eat_match<S: Into<String>>(&mut self, target: TokenKind, msg: S, err_tok: &Token) -> Result<Token, Err> {
     let t = self.eat();
-    if !matches!(t.kind, target) { Err(err) }
+    if t.kind != target {
+      Err(err_tok.to_err(msg, self.lexer))
+    }
     else { Ok(t) }
   }
 
@@ -315,8 +325,6 @@ impl<'a> Cursor<'a> {
       if self.peek().kind.is_safe() { break }
       self.advance();
     }
-
-    self.panic = false;
   }
 
   fn curr_id(&self) -> TokenId {
