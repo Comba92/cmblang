@@ -1,28 +1,24 @@
 use std::collections::HashMap;
-use crate::{CursorIter, FrontendErrAlias, FrontendErr, lexer::*};
+use crate::{CursorIter, FrontendErr, FrontendErrAlias, IdSize, lexer::*};
+
+// TODO: better error messages
 
 #[derive(Debug, Clone, Copy)]
-pub struct TokenId(usize);
-impl From<usize> for TokenId {
-  fn from(value: usize) -> Self { Self(value) }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct ExprId(usize);
+pub struct ExprId(pub IdSize);
 impl From<usize> for ExprId {
-  fn from(value: usize) -> Self { Self(value) }
+  fn from(value: usize) -> Self { Self(value as IdSize) }
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct StmtId(usize);
+pub struct StmtId(pub IdSize);
 impl From<usize> for StmtId {
-  fn from(value: usize) -> Self { Self(value) }
+  fn from(value: usize) -> Self { Self(value as IdSize) }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TypeId(usize);
+pub struct TypeId(pub IdSize);
 impl From<usize> for TypeId {
-  fn from(value: usize) -> Self { Self(value) }
+  fn from(value: usize) -> Self { Self(value as IdSize) }
 }
 
 #[derive(Debug)]
@@ -31,6 +27,16 @@ pub enum ExprLiteral {
   Float(TokenId),
   Bool(TokenId),
   Array(Vec<ExprId>),
+}
+impl ExprLiteral {
+  pub fn token(&self) -> TokenId {
+    match self {
+      ExprLiteral::Int(id) => *id,
+      ExprLiteral::Float(id) => *id,
+      ExprLiteral::Bool(id) => *id,
+      ExprLiteral::Array(expr_ids) => todo!("no way to get a token from empty array!"),
+    }
+  }
 }
 
 #[derive(Debug)]
@@ -42,6 +48,19 @@ pub enum Expr{
   Call { callee: ExprId, args: Vec<ExprId> },
   Member { lhs: ExprId, field: TokenId },
   Index { lhs: ExprId, idx: ExprId },
+}
+impl Expr {
+  pub fn token(&self) -> TokenId {
+    match self {
+      Expr::Literal(lit) => lit.token(),
+      Expr::Variable(id) => *id,
+      Expr::Unary { op, rhs } => *op,
+      Expr::Binary { op, lhs, rhs } => *op,
+      Expr::Call { callee, args } => todo!("get token from callee?"),
+      Expr::Member { lhs, field } => todo!("get token from member?"),
+      Expr::Index { lhs, idx } => todo!("get token from lhs?"),
+    }
+  }
 }
 
 fn prefix_lvl(kind: TokenKind) -> i8 {
@@ -82,7 +101,8 @@ fn infix_lvl(kind: TokenKind) -> (i8, i8) {
 pub enum Stmt {
   Decl { name: TokenId, ty: TypeId, rhs: ExprId, constant: bool },
   FnDecl { name: TokenId, param_names: Vec<TokenId>, ty: TypeId, block: StmtId },
-  
+  StructDecl { ty: TypeId },
+
   Assign { lhs: ExprId, rhs: ExprId },
   Block { stmts: Vec<StmtId> },
   IfElse { cond: ExprId, iblock: StmtId, eblock: Option<StmtId> },
@@ -91,8 +111,9 @@ pub enum Stmt {
   Expr(ExprId),
 }
 
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, strum::EnumCount)]
 pub enum Type {
+  #[default]
   Untyped,
   Void,
   Int,
@@ -100,11 +121,9 @@ pub enum Type {
   Bool,
   Array { inner: TypeId, len: Option<usize> },
   Func { params: Vec<TypeId>, ret: TypeId },
-  Struct { name: String, fields: Vec<(String, TypeId)> }
+  // TODO: not sure about keeping strings here
+  Struct { name: TokenId, fields: Vec<(TokenId, TypeId)> }
 }
-
-const NO_TY_ID: TypeId = TypeId(0);
-const VOID_TY_ID: TypeId = TypeId(1);
 
 pub struct TypeInfo {
   kind: Type,
@@ -118,21 +137,31 @@ pub struct Parser<'a> {
   stmts: Vec<Stmt>,
   types: HashMap<Type, TypeId>,
 
-  top_lvl: Vec<StmtId>,
-
   errors: Vec<FrontendErr>,
 }
 
 type ParseResult<T> = Result<T, FrontendErrAlias>;
 
+pub mod ty_id {
+  use super::TypeId;
+
+  pub const UNTYPED:  TypeId = TypeId(0);
+  pub const VOID:     TypeId = TypeId(1);
+  pub const BOOL:     TypeId = TypeId(2);
+  pub const INT:      TypeId = TypeId(3);
+  pub const FLOAT:    TypeId = TypeId(4);
+}
+
 impl<'a> Parser<'a> {
-  pub fn new(src: &'a str, lexer: &'a Lexer) -> Self {
+  pub fn new(lexer: &'a Lexer) -> Self {
     let mut types = HashMap::new();
-    types.insert(Type::Untyped, NO_TY_ID.into());
-    types.insert(Type::Void, VOID_TY_ID.into());
-    types.insert(Type::Bool, 2.into());
-    types.insert(Type::Int, 3.into());
-    types.insert(Type::Float, 4.into());
+
+    use ty_id::*;
+    types.insert(Type::Untyped, UNTYPED);
+    types.insert(Type::Void, VOID);
+    types.insert(Type::Bool, BOOL);
+    types.insert(Type::Int, INT);
+    types.insert(Type::Float, FLOAT);
 
     Parser {
       cursor: Cursor { lexer, curr: 0 },
@@ -140,23 +169,24 @@ impl<'a> Parser<'a> {
       stmts: Vec::new(),
       types,
 
-      top_lvl: Vec::new(),
       errors: Vec::new(),
     }
   }
 
   pub fn err<S: Into<String>>(&self, msg: S, t: &Token) -> FrontendErrAlias {
-    t.to_err(msg, self.cursor.lexer)
+    let err = t.to_err(msg, self.cursor.lexer);
+    // self.errors.push(err.clone());
+    err
   }
 
   pub fn push_expr(&mut self, e: Expr) -> ExprId {
     self.exprs.push(e);
-    ExprId(self.exprs.len()-1)
+    ExprId(self.exprs.len() as u32 - 1)
   }
 
   pub fn push_stmt(&mut self, s: Stmt) -> StmtId {
     self.stmts.push(s);
-    StmtId(self.stmts.len()-1)
+    StmtId(self.stmts.len() as u32 - 1)
   }
 
   pub fn push_type(&mut self, ty: Type) -> TypeId {
@@ -180,18 +210,6 @@ impl<'a> Parser<'a> {
       }
 
       TokenKind::ParenL => {
-        // let mut params = Vec::new();
-        // while self.cursor.has_some() {
-        //   if self.cursor.eat_if(TokenKind::ParenR).is_some() { break }
-        //   params.push(self.parse_type()?);
-
-        //   let t = self.cursor.peek();
-        //   if t.kind != TokenKind::Comma {
-        //     self.cursor.eat_match(TokenKind::ParenR, "expect ')' after function parameters")?;
-        //   } else {
-        //     self.cursor.advance();
-        //   }
-        // }
         let params = self.collect_listing(
           Self::parse_type,
           TokenKind::Comma,
@@ -200,7 +218,7 @@ impl<'a> Parser<'a> {
  
         let ret = if self.cursor.eat_if(TokenKind::Arrow).is_some() {
           self.parse_type()?
-        } else { VOID_TY_ID };
+        } else { ty_id::VOID };
 
         Type::Func { params, ret }
       }
@@ -230,14 +248,14 @@ impl<'a> Parser<'a> {
     Ok(self.push_type(ty))
   }
 
-  fn collect_listing<T, F>(&mut self, getter: F, separator: TokenKind, terminator: TokenKind, err: &str) -> ParseResult<Vec<T>>
+  fn collect_listing<T, F>(&mut self, getter: F, separator: TokenKind, terminator: TokenKind, err_unclosed: &str) -> ParseResult<Vec<T>>
     where
       F: Fn(&mut Self) -> ParseResult<T>,
   {
     let mut list = Vec::new();
     loop {
       if !self.cursor.has_some() {
-        return Err(self.err(err, &self.cursor.lexer.eof()))
+        return Err(self.err(err_unclosed, &self.cursor.lexer.eof()))
       }
       if self.cursor.eat_if(terminator).is_some() { break }
 
@@ -282,20 +300,6 @@ impl<'a> Parser<'a> {
       }
 
       BraceL => {
-        // let mut exprs = Vec::new();
-        // while self.cursor.has_some() {
-        //   if self.cursor.eat_if(TokenKind::BraceR).is_some() { break }
-          
-        //   let expr = self.parse_expr(0)?;
-        //   exprs.push(expr);
-
-        //   if self.cursor.eat_if(TokenKind::Comma).is_none() {
-        //     // if we don't find a comma, we are expecting a paren closing
-        //     // if we don't get a paren closing, it is an error
-        //     self.cursor.eat_match(TokenKind::BraceR, "expect ']' after array values")?;
-        //   }
-        // }
-
         let exprs = self.collect_listing(
           |p| p.parse_expr(0),
           TokenKind::Comma,
@@ -353,7 +357,7 @@ impl<'a> Parser<'a> {
 
     let ty_id = if self.cursor.peek().kind == TokenKind::Assign {
       self.cursor.advance();
-      NO_TY_ID
+      ty_id::UNTYPED
     } else {
       let id = self.parse_type()?;
 
@@ -476,7 +480,7 @@ impl<'a> Parser<'a> {
     let ret = if self.cursor.eat_if(TokenKind::Arrow).is_some() {
       self.parse_type()?
     } else {
-      VOID_TY_ID
+      ty_id::VOID
     };
 
     let block = self.parse_block()?;
@@ -486,6 +490,31 @@ impl<'a> Parser<'a> {
     let ty_id = self.push_type(ty);
 
     Ok(self.push_stmt(Stmt::FnDecl { name, param_names, ty: ty_id, block }))
+  }
+
+  fn parse_struct(&mut self) -> ParseResult<StmtId> {
+    self.cursor.advance();
+
+    let name = self.cursor.eat_match(TokenKind::Ident, "expect struct name after 'struct' keyword")?;
+    let name_id = self.cursor.prev_id();
+    self.cursor.eat_match(TokenKind::CurlyL, "expect '{' after struct name")?;
+  
+    let fields = self.collect_listing(
+      |p| {
+        let name = p.cursor.eat_match(TokenKind::Ident, "expect field name in struct declaration")?;
+        let id = p.cursor.prev_id();
+        p.cursor.eat_match(TokenKind::Colon, "expect ':' after name in struct declaration")?;
+        let ty = p.parse_type()?;
+
+        Ok((id, ty))
+      },
+      TokenKind::Comma,
+      TokenKind::CurlyR,
+      "expect '}' after struct fields")?;
+
+    let ty = self.push_type(Type::Struct { name: name_id, fields });
+
+    Ok(self.push_stmt(Stmt::StructDecl { ty }))
   }
 
   pub fn parse_stmt(&mut self) -> ParseResult<StmtId> {
@@ -515,6 +544,12 @@ impl<'a> Parser<'a> {
         KeywordKind::If => self.parse_ifelse()?,
         KeywordKind::While => self.parse_while()?,
         KeywordKind::Fn => self.parse_func()?,
+        KeywordKind::Return => {
+          self.cursor.advance();
+          let expr = self.parse_expr(0)?;
+          self.push_stmt(Stmt::Return { expr })
+        }
+        KeywordKind::Struct => self.parse_struct()?,
         _ => return Err(self.err("invalid keyword", &t)),
       }
 
@@ -547,32 +582,32 @@ impl<'a> CursorIter<Token, Token> for Cursor<'a> {
   fn curr_mut(&mut self) -> &mut usize { &mut self.curr }
 }
 
-pub struct Ast {
-  pub tokens: Vec<Token>,
-  pub exprs: Vec<Expr>,
-  pub stmts: Vec<Stmt>,
-  pub types: HashMap<Type, TypeId>
-}
 
-pub fn parse(src: &str) -> Ast {
+pub fn parse(src: &str) -> crate::ast::Ast {
   let lexer = tokenize(src);
-  let mut p = Parser::new(src, &lexer);
+  let mut p = Parser::new(&lexer);
 
+  let mut top_lvl = Vec::new();
   while p.cursor.has_some() {
     let stmt = p.parse_stmt();
 
-    if let Err(e) = stmt {
-      eprintln!("[PARSE ERR] {e}");
-      p.errors.push(e);
-      p.cursor.eat_until_safe();
+    match stmt {
+      Ok(id) => top_lvl.push(id),
+      Err(e) => {
+        eprintln!("[PARSE ERR] {e}");
+        p.errors.push(e);
+        p.cursor.eat_until_safe();
+      } 
     }
   }
 
-  Ast {
+  p.stmts.push(Stmt::Block { stmts: top_lvl });
+
+  crate::ast::Ast {
     exprs: p.exprs,
     stmts: p.stmts,
     types: p.types,
-    tokens: lexer.tokens,
+    lexer,
   }
 }
 

@@ -1,6 +1,12 @@
 use std::{collections::HashMap, sync::LazyLock};
 use strum::IntoEnumIterator;
-use crate::CursorIter;
+use crate::{CursorIter, IdSize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TokenId(pub IdSize);
+impl From<usize> for TokenId {
+  fn from(value: usize) -> Self { Self(value as IdSize) }
+}
 
 static KEYWORDS: LazyLock<HashMap<String, KeywordKind>> = LazyLock::new(|| {
   let mut map = HashMap::new();
@@ -19,7 +25,7 @@ pub struct Span {
 }
 impl Span {
   pub fn len(&self) -> u32 { self.end - self.start }
-  pub fn str<'a, 'b>(&'a self, src: &'b str) -> &'b str { &src[self.start as usize .. self.end as usize] }
+  pub fn get_str<'a, 'b>(&'a self, src: &'b str) -> &'b str { &src[self.start as usize .. self.end as usize] }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumIter, strum::Display)]
@@ -27,6 +33,7 @@ impl Span {
 pub enum KeywordKind {
   If, Else, While,
   Fn, Return,
+  Struct,
   True, False,
   And, Or, Not,
   Const, Int, Float, Bool,
@@ -93,7 +100,7 @@ impl Token {
     crate::FrontendErr::new(lexer, msg.into(), self.info.clone())
   }
 
-  pub fn str<'a, 'b>(&'a self, src: &'b str) -> &'b str { self.info.str(src) }
+  pub fn get_str<'a, 'b>(&'a self, src: &'b str) -> &'b str { self.info.get_str(src) }
 }
 
 pub struct Lexer<'a> {
@@ -104,6 +111,10 @@ pub struct Lexer<'a> {
 impl<'a> Lexer<'a> {
   pub fn eof(&self) -> Token {
     Token { kind: TokenKind::Eof, info: Span { start: self.src.len() as u32, end: self.src.len() as u32 } }
+  }
+
+  pub fn str_from_id(&self, id: TokenId) -> &'a str {
+    self.tokens[id.0 as usize].get_str(self.src)
   }
 }
 

@@ -1,9 +1,11 @@
 use std::{error::{self, Error}, fmt, fs};
 
 pub type FrontendErrAlias = FrontendErr;
+pub type IdSize = u32;
 
 mod lexer;
 mod parser;
+mod ast;
 mod typecheck;
 
 #[derive(Debug, Clone)]
@@ -29,7 +31,7 @@ impl FrontendErr {
     
     Self {
       msg,
-      str: span.str(lexer.src).to_owned(),
+      str: span.get_str(lexer.src).to_owned(),
       span,
       line,
       column
@@ -70,11 +72,13 @@ fn main() -> Result<(), Box<dyn Error>> {
   // println!();
   // println!();
 
-  parser.exprs.iter() .enumerate().for_each(|(i, e)| println!("{i}: {e:?}"));
-  println!();  
-  parser.stmts.iter() .enumerate().for_each(|(i, s)| println!("{i}: {s:?}"));
-  println!();
-  parser.types.iter() .enumerate().for_each(|(i, ty)| println!("{i}: {ty:?}"));
+  // parser.exprs.iter() .enumerate().for_each(|(i, e)| println!("{i}: {e:?}"));
+  // println!();  
+  // parser.stmts.iter() .enumerate().for_each(|(i, s)| println!("{i}: {s:?}"));
+  // println!();
+  // parser.types.iter() .enumerate().for_each(|(i, ty)| println!("{i}: {ty:?}"));
+
+  let typecheck = typecheck::check(&parser);
 
   Ok(())
 }
