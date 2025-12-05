@@ -73,6 +73,8 @@ fn main() -> Result<(), Box<dyn Error>> {
   parser.exprs.iter() .enumerate().for_each(|(i, e)| println!("{i}: {e:?}"));
   println!();  
   parser.stmts.iter() .enumerate().for_each(|(i, s)| println!("{i}: {s:?}"));
+  println!();
+  parser.types.iter() .enumerate().for_each(|(i, ty)| println!("{i}: {ty:?}"));
 
   Ok(())
 }

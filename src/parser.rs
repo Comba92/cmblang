@@ -90,7 +90,7 @@ pub enum Stmt {
   Expr(ExprId),
 }
 
-#[derive(PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub enum Type {
   Untyped,
   Void,
@@ -177,6 +177,30 @@ impl<'a> Parser<'a> {
         KeywordKind::Float => Type::Float,
         _ => return Err(self.err("invalid type annotation", &t)),
       }
+
+      TokenKind::ParenL => {
+        let mut params = Vec::new();
+        while self.cursor.has_some() {
+          if self.cursor.eat_if(TokenKind::ParenR).is_some() { break }
+          params.push(self.parse_type()?);
+
+          let t = self.cursor.peek();
+          if t.kind != TokenKind::Comma {
+            self.cursor.eat_match(TokenKind::ParenR, "expect ')' after fruntion parameters")?;
+          } else {
+            self.cursor.advance();
+          }
+        }
+ 
+        let ret = if self.cursor.eat_if(TokenKind::Arrow).is_some() {
+          self.parse_type()?
+        } else { VOID_TY_ID };
+
+        Type::Func { params, ret }
+      }
+
+      TokenKind::BraceL => todo!("parse array type"),
+      TokenKind::Ident => todo!("parse user defined type"),
 
       _ => return Err(self.err("invalid type annotation", &t)),
     };
@@ -267,7 +291,7 @@ impl<'a> Parser<'a> {
       let id = self.parse_type()?;
 
       // eat '='
-      self.cursor.advance();
+      self.cursor.eat_match(TokenKind::Assign, "expect '=' after type annotation")?;
       id
     };
 
@@ -344,14 +368,7 @@ impl<'a> Parser<'a> {
     let mut param_names = Vec::new();
     let mut param_types = Vec::new();
     while self.cursor.has_some() {
-      if self.cursor.eat_if(TokenKind::Comma).is_none() {
-        
-      }
-
-      if self.cursor.peek().kind == TokenKind::ParenR { 
-        self.cursor.advance();  
-        break;
-      }
+      if self.cursor.eat_if(TokenKind::ParenR).is_some() { break; }
 
       self.cursor.eat_match(TokenKind::Ident, "expect param name in function signature")?;
       param_names.push(self.cursor.prev_id());
@@ -364,10 +381,10 @@ impl<'a> Parser<'a> {
         // if we don't find a comma, we are expecting a paren closing
         // if we don't get a paren closing, it is an error
         self.cursor.eat_match(TokenKind::ParenR, "expect ')' after function parameters")?;
+      } else {
+        self.cursor.advance();
       }
     }
-
-    println!("FUNCTION PARSED: {:?} {:?}", param_names, param_types);
 
     let ret = if self.cursor.eat_if(TokenKind::Arrow).is_some() {
       self.parse_type()?
@@ -375,9 +392,7 @@ impl<'a> Parser<'a> {
       VOID_TY_ID
     };
 
-    println!("TOKEN AFTER SIGNATURE: {:?}", self.cursor.peek());
     let block = self.parse_block()?;
-    println!("TOKEN AFTER FUNC BLOCK: {:?}", self.cursor.peek());
 
     let ty = Type::Func { params: param_types, ret };
     let ty_id = self.push_type(ty);
@@ -448,6 +463,7 @@ pub struct Ast {
   pub tokens: Vec<Token>,
   pub exprs: Vec<Expr>,
   pub stmts: Vec<Stmt>,
+  pub types: HashMap<Type, TypeId>
 }
 
 pub fn parse(src: &str) -> Ast {
@@ -467,6 +483,7 @@ pub fn parse(src: &str) -> Ast {
   Ast {
     exprs: p.exprs,
     stmts: p.stmts,
+    types: p.types,
     tokens: lexer.tokens,
   }
 }
