@@ -1,24 +1,22 @@
 use std::{error::{self, Error}, fmt, fs};
 
-pub type Err = FrontendErr;
+pub type FrontendErrAlias = FrontendErr;
 
-#[test]
-fn partition() {
-  let vec = (0..10).step_by(2).collect::<Vec<_>>();
-  let res = vec.binary_search(&1);
-  println!("{res:?}");
-}
+mod lexer;
+mod parser;
+mod typecheck;
 
 #[derive(Debug, Clone)]
 pub struct FrontendErr {
   msg: String,
   span: lexer::Span,
-  token: String,
+  str: String,
   column: usize,
   line: usize,
 }
 impl FrontendErr {
-  pub fn new(msg: String, span: lexer::Span, lexer: &lexer::Lexer) -> Self {
+  pub fn new(lexer: &lexer::Lexer, msg: String, span: lexer::Span) -> Self {
+    // TODO: is binary search really that fast?
     let line = match lexer.line_offsets.binary_search(&span.start) {
       // token starts exactly at line, return as is
       Ok(idx) => idx,
@@ -31,7 +29,7 @@ impl FrontendErr {
     
     Self {
       msg,
-      token: span.slice(lexer.src).to_owned(),
+      str: span.str(lexer.src).to_owned(),
       span,
       line,
       column
@@ -41,7 +39,7 @@ impl FrontendErr {
 
 impl fmt::Display for FrontendErr {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    write!(f, "{} at token: '{}', line: {}, column: {}", self.msg, self.token, self.line, self.column)
+    write!(f, "{} at token: '{}', line: {}, column: {}", self.msg, self.str, self.line+1, self.column+1)
   }
 }
 impl error::Error for FrontendErr {}
@@ -61,19 +59,20 @@ trait CursorIter<Inner, Mapped> {
   fn slice(&self) -> &[Inner] { &self.start()[self.curr()..] }
   fn curr(&self) -> usize;
   fn curr_mut(&mut self) -> &mut usize;
-  fn at_end(&self) -> bool { self.curr() >= self.start().len() }
+  fn has_some(&self) -> bool { self.curr() < self.start().len() }
 }
-
-mod lexer;
-mod parser;
 
 fn main() -> Result<(), Box<dyn Error>> {
   let src = fs::read_to_string("test.cmb")?;
 
   let parser = parser::parse(&src);
-  parser.tokens.iter().for_each(|t| println!("{t:?}"));
-  parser.exprs.iter().for_each(|e| println!("{e:?}"));
-  parser.stmts.iter().for_each(|s| println!("{s:?}"));
+  // parser.tokens.iter().enumerate().for_each(|(i, t)| println!("{i}: {t:?}"));
+  // println!();
+  // println!();
+
+  parser.exprs.iter() .enumerate().for_each(|(i, e)| println!("{i}: {e:?}"));
+  println!();  
+  parser.stmts.iter() .enumerate().for_each(|(i, s)| println!("{i}: {s:?}"));
 
   Ok(())
 }

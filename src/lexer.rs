@@ -19,7 +19,7 @@ pub struct Span {
 }
 impl Span {
   pub fn len(&self) -> u32 { self.end - self.start }
-  pub fn slice<'a, 'b>(&'a self, src: &'b str) -> &'b str { &src[self.start as usize .. self.end as usize] }
+  pub fn str<'a, 'b>(&'a self, src: &'b str) -> &'b str { &src[self.start as usize .. self.end as usize] }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumIter, strum::Display)]
@@ -29,12 +29,13 @@ pub enum KeywordKind {
   Fn, Return,
   True, False,
   And, Or, Not,
-  Int, Float, Bool,
+  Const, Int, Float, Bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TokenKind {
   Err(char),
+  Eof,
 
   Assign,
   Comma,
@@ -75,7 +76,7 @@ impl TokenKind {
     use TokenKind::*;
     
     match self {
-      CurlyL | Keyword(KeywordKind::If)|
+      Semicolon | ParenL | BraceL | CurlyL | Keyword(KeywordKind::If) |
       Keyword(KeywordKind::While) | Keyword(KeywordKind::Fn) => true,
       _ => false,
     }
@@ -88,15 +89,22 @@ pub struct Token {
   pub info: Span,
 }
 impl Token {
-  pub fn to_err<S: Into<String>>(&self, msg: S, lexer: &Lexer) -> crate::Err {
-    crate::FrontendErr::new(msg.into(), self.info.clone(), lexer)
+  pub fn to_err<S: Into<String>>(&self, msg: S, lexer: &Lexer) -> crate::FrontendErrAlias {
+    crate::FrontendErr::new(lexer, msg.into(), self.info.clone())
   }
+
+  pub fn str<'a, 'b>(&'a self, src: &'b str) -> &'b str { self.info.str(src) }
 }
 
 pub struct Lexer<'a> {
   pub src: &'a str,
   pub line_offsets: Vec<u32>,
   pub tokens: Vec<Token>,
+}
+impl<'a> Lexer<'a> {
+  pub fn eof(&self) -> Token {
+    Token { kind: TokenKind::Eof, info: Span { start: self.src.len() as u32, end: self.src.len() as u32 } }
+  }
 }
 
 pub struct Cursor<'a> {
@@ -130,12 +138,12 @@ pub fn tokenize(src: &str) -> Lexer {
   let mut lexer = Lexer { src, tokens: Vec::new(), line_offsets: vec![0] };
   let mut cursor = Cursor {bytes: src.as_bytes(), curr: 0};
   
-  'start: while !cursor.at_end() {
+  'start: while cursor.has_some() {
     let spaces = cursor.slice().iter()
       .take_while(|c| c.is_ascii_whitespace() && **c != b'\n')
       .count();
     cursor.advance_nth(spaces);
-    if cursor.at_end() { break }
+    if !cursor.has_some() { break }
 
     let start = cursor.curr();
     let mut len = 1;
