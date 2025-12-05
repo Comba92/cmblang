@@ -76,7 +76,7 @@ impl TokenKind {
     use TokenKind::*;
     
     match self {
-      Semicolon | ParenL | BraceL | CurlyL | Keyword(KeywordKind::If) |
+      Semicolon | Comma | ParenL | BraceL | CurlyL | Keyword(KeywordKind::If) |
       Keyword(KeywordKind::While) | Keyword(KeywordKind::Fn) => true,
       _ => false,
     }

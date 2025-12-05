@@ -30,6 +30,7 @@ pub enum ExprLiteral {
   Int(TokenId),
   Float(TokenId),
   Bool(TokenId),
+  Array(Vec<ExprId>),
 }
 
 #[derive(Debug)]
@@ -97,7 +98,7 @@ pub enum Type {
   Int,
   Float,
   Bool,
-  Array { inner: TypeId, len: usize },
+  Array { inner: TypeId, len: Option<usize> },
   Func { params: Vec<TypeId>, ret: TypeId },
   Struct { name: String, fields: Vec<(String, TypeId)> }
 }
@@ -179,18 +180,23 @@ impl<'a> Parser<'a> {
       }
 
       TokenKind::ParenL => {
-        let mut params = Vec::new();
-        while self.cursor.has_some() {
-          if self.cursor.eat_if(TokenKind::ParenR).is_some() { break }
-          params.push(self.parse_type()?);
+        // let mut params = Vec::new();
+        // while self.cursor.has_some() {
+        //   if self.cursor.eat_if(TokenKind::ParenR).is_some() { break }
+        //   params.push(self.parse_type()?);
 
-          let t = self.cursor.peek();
-          if t.kind != TokenKind::Comma {
-            self.cursor.eat_match(TokenKind::ParenR, "expect ')' after fruntion parameters")?;
-          } else {
-            self.cursor.advance();
-          }
-        }
+        //   let t = self.cursor.peek();
+        //   if t.kind != TokenKind::Comma {
+        //     self.cursor.eat_match(TokenKind::ParenR, "expect ')' after function parameters")?;
+        //   } else {
+        //     self.cursor.advance();
+        //   }
+        // }
+        let params = self.collect_listing(
+          Self::parse_type,
+          TokenKind::Comma,
+          TokenKind::ParenR,
+          "unclosed parenthesis in function annotation's params")?;
  
         let ret = if self.cursor.eat_if(TokenKind::Arrow).is_some() {
           self.parse_type()?
@@ -199,7 +205,23 @@ impl<'a> Parser<'a> {
         Type::Func { params, ret }
       }
 
-      TokenKind::BraceL => todo!("parse array type"),
+      TokenKind::BraceL => {
+        let inner = self.parse_type()?;
+        self.cursor.eat_match(TokenKind::Colon, "expect ':' after array inner type")?;
+        
+        // TODO: might be cool if this can be a constant integer expression?
+        let len_tok = self.cursor.eat();
+
+        let len = match len_tok.kind {
+          TokenKind::Star => None,
+          TokenKind::IntLit(len) => Some(len as usize),
+          _ => return Err(self.err("expect integer literal or '*' (inferred size) for size in array type annotation", &len_tok)) 
+        };
+
+        self.cursor.eat_match(TokenKind::BraceR, "expect closing ']' in array type annotation")?;
+
+        Type::Array { inner, len }
+      }
       TokenKind::Ident => todo!("parse user defined type"),
 
       _ => return Err(self.err("invalid type annotation", &t)),
@@ -207,7 +229,32 @@ impl<'a> Parser<'a> {
 
     Ok(self.push_type(ty))
   }
-  
+
+  fn collect_listing<T, F>(&mut self, getter: F, separator: TokenKind, terminator: TokenKind, err: &str) -> ParseResult<Vec<T>>
+    where
+      F: Fn(&mut Self) -> ParseResult<T>,
+  {
+    let mut list = Vec::new();
+    loop {
+      if !self.cursor.has_some() {
+        return Err(self.err(err, &self.cursor.lexer.eof()))
+      }
+      if self.cursor.eat_if(terminator).is_some() { break }
+
+      let item = getter(self)?;
+      list.push(item);
+
+      if self.cursor.eat_if(separator).is_none() {
+        // if we don't find a comma, we are expecting a paren closing
+        // if we don't get a paren closing, it is an error
+        if self.cursor.eat_if(terminator).is_some() { break }
+      }
+    }
+
+    Ok(list)
+  }
+
+  // TODO: there should probably be a wrapper version which takes a custom error as arg if parsing fails 
   fn parse_expr(&mut self, prec_lvl: i8) -> ParseResult<ExprId> {
     let id = self.cursor.curr_id();
     let t = self.cursor.eat();
@@ -235,7 +282,27 @@ impl<'a> Parser<'a> {
       }
 
       BraceL => {
-        todo!("array literal")
+        // let mut exprs = Vec::new();
+        // while self.cursor.has_some() {
+        //   if self.cursor.eat_if(TokenKind::BraceR).is_some() { break }
+          
+        //   let expr = self.parse_expr(0)?;
+        //   exprs.push(expr);
+
+        //   if self.cursor.eat_if(TokenKind::Comma).is_none() {
+        //     // if we don't find a comma, we are expecting a paren closing
+        //     // if we don't get a paren closing, it is an error
+        //     self.cursor.eat_match(TokenKind::BraceR, "expect ']' after array values")?;
+        //   }
+        // }
+
+        let exprs = self.collect_listing(
+          |p| p.parse_expr(0),
+          TokenKind::Comma,
+          TokenKind::BraceR,
+          "unclosed array literal")?;
+
+        self.push_expr(Expr::Literal(ExprLiteral::Array(exprs)))
       }
 
       _ => return Result::Err(self.err("invalid lhs expression", &t)),
@@ -365,26 +432,46 @@ impl<'a> Parser<'a> {
 
     self.cursor.eat_match(TokenKind::ParenL, "expect '(' after function name")?;
     
-    let mut param_names = Vec::new();
-    let mut param_types = Vec::new();
-    while self.cursor.has_some() {
-      if self.cursor.eat_if(TokenKind::ParenR).is_some() { break; }
+    // let mut param_names = Vec::new();
+    // let mut param_types = Vec::new();
+    // while self.cursor.has_some() {
+    //   if self.cursor.eat_if(TokenKind::ParenR).is_some() { break; }
 
-      self.cursor.eat_match(TokenKind::Ident, "expect param name in function signature")?;
-      param_names.push(self.cursor.prev_id());
+    //   self.cursor.eat_match(TokenKind::Ident, "expect param name in function signature")?;
+    //   param_names.push(self.cursor.prev_id());
 
-      self.cursor.eat_match(TokenKind::Colon, "expect ':' after param name")?;
-      param_types.push(self.parse_type()?);
+    //   self.cursor.eat_match(TokenKind::Colon, "expect ':' after param name")?;
+    //   param_types.push(self.parse_type()?);
 
-      let t = self.cursor.peek();
-      if t.kind != TokenKind::Comma {
-        // if we don't find a comma, we are expecting a paren closing
-        // if we don't get a paren closing, it is an error
-        self.cursor.eat_match(TokenKind::ParenR, "expect ')' after function parameters")?;
-      } else {
-        self.cursor.advance();
-      }
-    }
+    //   // let t = self.cursor.peek();
+    //   // if t.kind != TokenKind::Comma {
+    //   //   // if we don't find a comma, we are expecting a paren closing
+    //   //   // if we don't get a paren closing, it is an error
+    //   //   self.cursor.eat_match(TokenKind::ParenR, "expect ')' after function parameters")?;
+    //   // } else {
+    //   //   self.cursor.advance();
+    //   // }
+
+    //   if self.cursor.eat_if(TokenKind::Comma).is_none() {
+    //     // if we don't find a comma, we are expecting a paren closing
+    //     // if we don't get a paren closing, it is an error
+    //     self.cursor.eat_match(TokenKind::ParenR, "expect ')' after function parameters")?;
+    //   }
+    // }
+
+    let params = self.collect_listing(
+      |p| {
+        p.cursor.eat_match(TokenKind::Ident, "expect param name in function signature")?;
+        let name = p.cursor.prev_id();
+
+        p.cursor.eat_match(TokenKind::Colon, "expect ':' after param name")?;
+        let ty = p.parse_type()?;
+
+        Ok((name, ty))
+      },
+      TokenKind::Comma,
+      TokenKind::ParenR,
+      "unclosed parenthesis in function declaration's parameters")?;
 
     let ret = if self.cursor.eat_if(TokenKind::Arrow).is_some() {
       self.parse_type()?
@@ -394,6 +481,7 @@ impl<'a> Parser<'a> {
 
     let block = self.parse_block()?;
 
+    let (param_names, param_types) = params.into_iter().unzip();
     let ty = Type::Func { params: param_types, ret };
     let ty_id = self.push_type(ty);
 
