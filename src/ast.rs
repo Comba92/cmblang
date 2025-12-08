@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt, hash::{DefaultHasher, Hash, Hasher}};
+use std::{collections::HashMap, fmt::{self, Display}, hash::{DefaultHasher, Hash, Hasher}};
 use crate::{IdSize, lexer::*, parser::*};
 
 fn hash_value<H: Hash>(value: H) -> u64 {
@@ -83,7 +83,7 @@ impl TypeInterner {
     id
   }
 
-  pub fn lookup(&mut self, id: TypeId) -> &Type {
+  pub fn lookup(&self, id: TypeId) -> &Type {
     &self.buf[self.vec[id.0 as usize] as usize]
   }
 }
@@ -92,7 +92,6 @@ pub struct Ast<'a> {
   pub lexer: Lexer<'a>,
   pub exprs: Vec<Expr>,
   pub stmts: Vec<Stmt>,
-  // pub types: HashMap<Type, TypeId>,
   pub types: TypeInterner,
   pub idents: StringInterner,
 }
@@ -101,17 +100,12 @@ impl<'a> Ast<'a> {
     (self.stmts.len() - 1).into()
   }
 
-  pub fn get_tok(&self, id: TokenId) -> Token {
-    self.lexer.tokens[id.0 as usize].clone()
+  pub fn get_tok(&self, id: TokenId) -> &Token {
+    &self.lexer.tokens[id.0 as usize]
   }
 
-  // pub fn get_tok_from_expr(&self, id: ExprId) -> Token {
-  //   let id = self.exprs[id.0 as usize].token();
-  //   self.lexer.tokens[id.0 as usize].clone()
-  // }
-
-  pub fn get_ty(&self, id: TypeId) -> Type {
-    todo!()
+  pub fn get_ty(&self, id: TypeId) -> &Type {
+    self.types.lookup(id)
   }
 }
 
@@ -121,13 +115,16 @@ impl From<usize> for IdentId {
   fn from(value: usize) -> Self { Self(value as IdSize) }
 }
 
-pub trait Visitor<E> {
-  fn visit_expr(&mut self, id: ExprId) -> Result<Type, E>;
+pub trait Visitor<E: std::error::Error> {
+  fn visit_expr(&mut self, id: ExprId) -> Result<TypeId, E>;
   fn visit_stmt(&mut self, id: StmtId) -> Result<(), E>;
 
-
   fn visit_block(&mut self, ids: &[StmtId]) -> Result<(), E> {
-    for id in ids { self.visit_stmt(*id); }
+    for id in ids {
+      if let Err(e) = self.visit_stmt(*id) {
+        eprintln!("[TYPE ERR]: {e}");
+      }
+    }
     Ok(())
   }
 }

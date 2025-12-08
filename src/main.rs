@@ -81,7 +81,7 @@ fn main() -> Result<(), Box<dyn Error>> {
   println!("{:?}", parser.types);
   println!("{:?}", parser.idents);
 
-  // let typecheck = typecheck::check(&parser);
+  let typecheck = typecheck::check(&parser);
 
   Ok(())
 }
