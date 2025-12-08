@@ -18,6 +18,7 @@ pub struct FrontendErr {
 }
 impl FrontendErr {
   pub fn new(lexer: &lexer::Lexer, msg: String, span: lexer::Span) -> Self {
+    // TODO: consider evaluating this lazily, computing column and line only when it is printed
     // TODO: is binary search really that fast?
     let line = match lexer.line_offsets.binary_search(&span.start) {
       // token starts exactly at line, return as is
@@ -76,9 +77,11 @@ fn main() -> Result<(), Box<dyn Error>> {
   // println!();  
   // parser.stmts.iter() .enumerate().for_each(|(i, s)| println!("{i}: {s:?}"));
   // println!();
-  // parser.types.iter() .enumerate().for_each(|(i, ty)| println!("{i}: {ty:?}"));
+  // parser.types.buf.iter() .enumerate().for_each(|(i, ty)| println!("{i}: {ty:?}"));
+  println!("{:?}", parser.types);
+  println!("{:?}", parser.idents);
 
-  let typecheck = typecheck::check(&parser);
+  // let typecheck = typecheck::check(&parser);
 
   Ok(())
 }

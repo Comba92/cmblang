@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-use crate::{CursorIter, FrontendErr, FrontendErrAlias, IdSize, lexer::*};
+use crate::{CursorIter, FrontendErr, FrontendErrAlias, IdSize, ast::{StringInterner, TypeInterner}, lexer::*};
 
 // TODO: better error messages
 
@@ -26,7 +25,7 @@ pub enum ExprLiteral {
   Int(TokenId),
   Float(TokenId),
   Bool(TokenId),
-  Array(Vec<ExprId>),
+  Array(TokenId, Vec<ExprId>),
 }
 impl ExprLiteral {
   pub fn token(&self) -> TokenId {
@@ -34,7 +33,7 @@ impl ExprLiteral {
       ExprLiteral::Int(id) => *id,
       ExprLiteral::Float(id) => *id,
       ExprLiteral::Bool(id) => *id,
-      ExprLiteral::Array(expr_ids) => todo!("no way to get a token from empty array!"),
+      ExprLiteral::Array(id, _) => *id,
     }
   }
 }
@@ -48,19 +47,6 @@ pub enum Expr{
   Call { callee: ExprId, args: Vec<ExprId> },
   Member { lhs: ExprId, field: TokenId },
   Index { lhs: ExprId, idx: ExprId },
-}
-impl Expr {
-  pub fn token(&self) -> TokenId {
-    match self {
-      Expr::Literal(lit) => lit.token(),
-      Expr::Variable(id) => *id,
-      Expr::Unary { op, rhs } => *op,
-      Expr::Binary { op, lhs, rhs } => *op,
-      Expr::Call { callee, args } => todo!("get token from callee?"),
-      Expr::Member { lhs, field } => todo!("get token from member?"),
-      Expr::Index { lhs, idx } => todo!("get token from lhs?"),
-    }
-  }
 }
 
 fn prefix_lvl(kind: TokenKind) -> i8 {
@@ -135,7 +121,8 @@ pub struct Parser<'a> {
 
   exprs: Vec<Expr>,
   stmts: Vec<Stmt>,
-  types: HashMap<Type, TypeId>,
+  types: TypeInterner,
+  idents: StringInterner,
 
   errors: Vec<FrontendErr>,
 }
@@ -154,20 +141,27 @@ pub mod ty_id {
 
 impl<'a> Parser<'a> {
   pub fn new(lexer: &'a Lexer) -> Self {
-    let mut types = HashMap::new();
-
-    use ty_id::*;
-    types.insert(Type::Untyped, UNTYPED);
-    types.insert(Type::Void, VOID);
-    types.insert(Type::Bool, BOOL);
-    types.insert(Type::Int, INT);
-    types.insert(Type::Float, FLOAT);
+    let mut types = TypeInterner::default();
+    types.intern(Type::Untyped);
+    types.intern(Type::Void);
+    types.intern(Type::Bool);
+    types.intern(Type::Int);
+    types.intern(Type::Float);
+    
+    // let mut types = HashMap::new();
+    // use ty_id::*;
+    // types.insert(Type::Untyped, UNTYPED);
+    // types.insert(Type::Void, VOID);
+    // types.insert(Type::Bool, BOOL);
+    // types.insert(Type::Int, INT);
+    // types.insert(Type::Float, FLOAT);
 
     Parser {
       cursor: Cursor { lexer, curr: 0 },
       exprs: Vec::new(),
       stmts: Vec::new(),
       types,
+      idents: Default::default(),
 
       errors: Vec::new(),
     }
@@ -184,18 +178,27 @@ impl<'a> Parser<'a> {
     ExprId(self.exprs.len() as u32 - 1)
   }
 
+  pub fn get_expr(&mut self, id: ExprId) -> &Expr {
+    &self.exprs[id.0 as usize]
+  }
+
   pub fn push_stmt(&mut self, s: Stmt) -> StmtId {
     self.stmts.push(s);
     StmtId(self.stmts.len() as u32 - 1)
   }
 
   pub fn push_type(&mut self, ty: Type) -> TypeId {
-    self.types.get(&ty)
-      .map(|x| *x)
-      .unwrap_or_else(|| {
-        self.types.insert(ty, self.types.len().into());
-        self.types.len().into()
-      })
+    // self.types.get(&ty)
+    //   .map(|x| *x)
+    //   .unwrap_or_else(|| {
+    //     self.types.insert(ty, self.types.len().into());
+    //     self.types.len().into()
+    //   })
+    self.types.intern(ty)
+  }
+
+  pub fn push_ident(&mut self, tok: TokenId) {
+    self.idents.intern(self.cursor.lexer.str_from_id(tok));
   }
 
   fn parse_type(&mut self) -> ParseResult<TypeId> {
@@ -274,23 +277,26 @@ impl<'a> Parser<'a> {
 
   // TODO: there should probably be a wrapper version which takes a custom error as arg if parsing fails 
   fn parse_expr(&mut self, prec_lvl: i8) -> ParseResult<ExprId> {
-    let id = self.cursor.curr_id();
+    let tok_id = self.cursor.curr_id();
     let t = self.cursor.eat();
 
     use TokenKind::*;
     let mut lhs = match t.kind {
-      IntLit(_)   => self.push_expr(Expr::Literal(ExprLiteral::Int(id))),
-      FloatLit(_) => self.push_expr(Expr::Literal(ExprLiteral::Float(id))),
-      Keyword(KeywordKind::True)  => self.push_expr(Expr::Literal(ExprLiteral::Bool(id))),
-      Keyword(KeywordKind::False) => self.push_expr(Expr::Literal(ExprLiteral::Bool(id))),
+      IntLit(_)   => self.push_expr(Expr::Literal(ExprLiteral::Int(tok_id))),
+      FloatLit(_) => self.push_expr(Expr::Literal(ExprLiteral::Float(tok_id))),
+      Keyword(KeywordKind::True)  => self.push_expr(Expr::Literal(ExprLiteral::Bool(tok_id))),
+      Keyword(KeywordKind::False) => self.push_expr(Expr::Literal(ExprLiteral::Bool(tok_id))),
 
-      Ident => self.push_expr(Expr::Variable(id)),
+      Ident => {
+        self.push_ident(tok_id);
+        self.push_expr(Expr::Variable(tok_id))
+      }
 
       // prefix op
       Minus | Bang => {
         let lvl = prefix_lvl(t.kind);
         let rhs = self.parse_expr(lvl)?;
-        self.push_expr(Expr::Unary { op: id, rhs })
+        self.push_expr(Expr::Unary { op: tok_id, rhs })
       }
 
       ParenL => {
@@ -306,7 +312,7 @@ impl<'a> Parser<'a> {
           TokenKind::BraceR,
           "unclosed array literal")?;
 
-        self.push_expr(Expr::Literal(ExprLiteral::Array(exprs)))
+        self.push_expr(Expr::Literal(ExprLiteral::Array(tok_id, exprs)))
       }
 
       _ => return Result::Err(self.err("invalid lhs expression", &t)),
@@ -352,6 +358,8 @@ impl<'a> Parser<'a> {
   }
 
   fn parse_decl(&mut self, name: TokenId, constant: bool) -> ParseResult<StmtId> {
+    self.push_ident(name);
+
     // eat ':'
     self.cursor.advance();
 
@@ -433,7 +441,8 @@ impl<'a> Parser<'a> {
 
     self.cursor.eat_match(TokenKind::Ident, "expect name after 'fn' keyword")?;
     let name = self.cursor.prev_id();
-
+    self.push_ident(name);
+    
     self.cursor.eat_match(TokenKind::ParenL, "expect '(' after function name")?;
     
     // let mut param_names = Vec::new();
@@ -467,6 +476,7 @@ impl<'a> Parser<'a> {
       |p| {
         p.cursor.eat_match(TokenKind::Ident, "expect param name in function signature")?;
         let name = p.cursor.prev_id();
+        p.push_ident(name);
 
         p.cursor.eat_match(TokenKind::Colon, "expect ':' after param name")?;
         let ty = p.parse_type()?;
@@ -497,12 +507,16 @@ impl<'a> Parser<'a> {
 
     let name = self.cursor.eat_match(TokenKind::Ident, "expect struct name after 'struct' keyword")?;
     let name_id = self.cursor.prev_id();
+    self.push_ident(name_id);
+
     self.cursor.eat_match(TokenKind::CurlyL, "expect '{' after struct name")?;
   
     let fields = self.collect_listing(
       |p| {
         let name = p.cursor.eat_match(TokenKind::Ident, "expect field name in struct declaration")?;
         let id = p.cursor.prev_id();
+        p.push_ident(id);
+
         p.cursor.eat_match(TokenKind::Colon, "expect ':' after name in struct declaration")?;
         let ty = p.parse_type()?;
 
@@ -574,7 +588,7 @@ impl<'a> CursorIter<Token, Token> for Cursor<'a> {
   fn peek_nth(&self, nth: usize) -> Token {
     self.lexer.tokens.get(self.curr() + nth)
     .cloned()
-    .unwrap_or_else(|| Token { kind: TokenKind::Err('\0'), info: Span::default() } )
+    .unwrap_or_else(|| Token { kind: TokenKind::Err('\0'), span: Span::default() } )
   }
 
   fn start(&self) -> &[Token] { &self.lexer.tokens }
@@ -607,6 +621,7 @@ pub fn parse(src: &str) -> crate::ast::Ast {
     exprs: p.exprs,
     stmts: p.stmts,
     types: p.types,
+    idents: p.idents,
     lexer,
   }
 }

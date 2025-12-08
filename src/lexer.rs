@@ -93,14 +93,14 @@ impl TokenKind {
 #[derive(Debug, Clone)]
 pub struct Token {
   pub kind: TokenKind,
-  pub info: Span,
+  pub span: Span,
 }
 impl Token {
   pub fn to_err<S: Into<String>>(&self, msg: S, lexer: &Lexer) -> crate::FrontendErrAlias {
-    crate::FrontendErr::new(lexer, msg.into(), self.info.clone())
+    crate::FrontendErr::new(lexer, msg.into(), self.span.clone())
   }
 
-  pub fn get_str<'a, 'b>(&'a self, src: &'b str) -> &'b str { self.info.get_str(src) }
+  pub fn get_str<'a, 'b>(&'a self, lex: &'b Lexer<'b>) -> &'b str { self.span.get_str(lex.src) }
 }
 
 pub struct Lexer<'a> {
@@ -110,11 +110,15 @@ pub struct Lexer<'a> {
 }
 impl<'a> Lexer<'a> {
   pub fn eof(&self) -> Token {
-    Token { kind: TokenKind::Eof, info: Span { start: self.src.len() as u32, end: self.src.len() as u32 } }
+    Token { kind: TokenKind::Eof, span: Span { start: self.src.len() as u32, end: self.src.len() as u32 } }
   }
 
-  pub fn str_from_id(&self, id: TokenId) -> &'a str {
-    self.tokens[id.0 as usize].get_str(self.src)
+  pub fn get_tok(&self, id: TokenId) -> &Token {
+    &self.tokens[id.0 as usize]
+  }
+
+  pub fn str_from_id(&'a self, id: TokenId) -> &'a str {
+    self.tokens[id.0 as usize].get_str(self)
   }
 }
 
@@ -237,7 +241,7 @@ pub fn tokenize(src: &str) -> Lexer {
 
     let t = Token {
       kind,
-      info: Span { start: start as u32, end: (start + len) as u32 }
+      span: Span { start: start as u32, end: (start + len) as u32 }
     };
 
     lexer.tokens.push(t);
