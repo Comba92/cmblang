@@ -54,7 +54,7 @@ impl StringInterner {
 pub struct TypeInterner {
   map: HashMap<u64, TypeId>,
   vec: Vec<u32>,
-  buf: Vec<Type>
+  pub buf: Vec<Type>
 }
 impl fmt::Debug for TypeInterner {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -119,12 +119,5 @@ pub trait Visitor<E: std::error::Error> {
   fn visit_expr(&mut self, id: ExprId) -> Result<TypeId, E>;
   fn visit_stmt(&mut self, id: StmtId) -> Result<(), E>;
 
-  fn visit_block(&mut self, ids: &[StmtId]) -> Result<(), E> {
-    for id in ids {
-      if let Err(e) = self.visit_stmt(*id) {
-        eprintln!("[TYPE ERR]: {e}");
-      }
-    }
-    Ok(())
-  }
+  fn visit_block(&mut self, ids: &[StmtId]) -> Result<(), E>;
 }

@@ -49,17 +49,17 @@ pub enum Expr{
   Index { lhs: ExprId, idx: ExprId },
 }
 impl Expr {
-  pub fn token(&self) -> TokenId {
-    match self {
-      Expr::Literal(lit) => lit.token(),
-      Expr::Variable(tok, _) => *tok,
-      Expr::Unary { op, rhs } => *op,
-      Expr::Binary { op, lhs, rhs } => *op,
-      Expr::Call { callee, args } => todo!(),
-      Expr::Member { lhs, field } => todo!(),
-      Expr::Index { lhs, idx } => todo!(),
-    }
-  }
+  // pub fn token(&self) -> TokenId {
+  //   match self {
+  //     Expr::Literal(lit) => lit.token(),
+  //     Expr::Variable(tok, _) => *tok,
+  //     Expr::Unary { op, rhs } => *op,
+  //     Expr::Binary { op, lhs, rhs } => *op,
+  //     Expr::Call { callee, args } => todo!(),
+  //     Expr::Member { lhs, field } => todo!(),
+  //     Expr::Index { lhs, idx } => todo!(),
+  //   }
+  // }
 }
 
 fn prefix_lvl(kind: TokenKind) -> i8 {
@@ -100,7 +100,7 @@ fn infix_lvl(kind: TokenKind) -> (i8, i8) {
 pub enum Stmt {
   Decl { name: TokenId, ident: IdentId, ty: TypeId, rhs: ExprId, constant: bool },
   FnDecl { name: TokenId, ident: IdentId, param_names: Vec<(TokenId, IdentId)>, ty: TypeId, block: StmtId },
-  StructDecl { ty: TypeId },
+  StructDecl { tok: TokenId, ty: TypeId },
 
   Assign { tok: TokenId, lhs: ExprId, rhs: ExprId },
   Block { stmts: Vec<StmtId> },
@@ -110,18 +110,18 @@ pub enum Stmt {
   Expr(ExprId),
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, strum::EnumCount)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
   #[default]
   Untyped,
+  UserDef { name: IdentId },
   Void,
   Int,
   Float,
   Bool,
   Array { inner: TypeId, len: Option<usize> },
   Func { params: Vec<TypeId>, ret: TypeId },
-  // TODO: not sure about keeping strings here
-  Struct { name: TokenId, fields: Vec<(TokenId, TypeId)> }
+  Struct { name: IdentId, fields: Vec<(IdentId, TypeId)> },
 }
 
 pub struct TypeInfo {
@@ -160,14 +160,6 @@ impl<'a> Parser<'a> {
     types.intern(Type::Bool);
     types.intern(Type::Int);
     types.intern(Type::Float);
-    
-    // let mut types = HashMap::new();
-    // use ty_id::*;
-    // types.insert(Type::Untyped, UNTYPED);
-    // types.insert(Type::Void, VOID);
-    // types.insert(Type::Bool, BOOL);
-    // types.insert(Type::Int, INT);
-    // types.insert(Type::Float, FLOAT);
 
     Parser {
       cursor: Cursor { lexer, curr: 0 },
@@ -256,7 +248,13 @@ impl<'a> Parser<'a> {
 
         Type::Array { inner, len }
       }
-      TokenKind::Ident => todo!("parse user defined type"),
+
+      TokenKind::Ident => {
+        // TODO: is this necessary?
+        let name = self.idents.intern(t.get_str(self.cursor.lexer));
+        // we have to declare it elsewhere, do nothing
+        Type::UserDef { name }
+      },
 
       _ => return Err(self.err("invalid type annotation", &t)),
     };
@@ -494,7 +492,7 @@ impl<'a> Parser<'a> {
   fn parse_struct(&mut self) -> ParseResult<StmtId> {
     self.cursor.advance();
 
-    let name = self.cursor.eat_match(TokenKind::Ident, "expect struct name after 'struct' keyword")?;
+    self.cursor.eat_match(TokenKind::Ident, "expect struct name after 'struct' keyword")?;
     let name_id = self.cursor.prev_id();
     let ident = self.push_ident(name_id);
 
@@ -502,22 +500,22 @@ impl<'a> Parser<'a> {
   
     let fields = self.collect_listing(
       |p| {
-        let name = p.cursor.eat_match(TokenKind::Ident, "expect field name in struct declaration")?;
+        p.cursor.eat_match(TokenKind::Ident, "expect field name in struct declaration")?;
         let id = p.cursor.prev_id();
         let ident = p.push_ident(id);
 
         p.cursor.eat_match(TokenKind::Colon, "expect ':' after name in struct declaration")?;
         let ty = p.parse_type()?;
 
-        Ok((id, ty))
+        Ok((ident, ty))
       },
       TokenKind::Comma,
       TokenKind::CurlyR,
       "expect '}' after struct fields")?;
 
-    let ty = self.push_type(Type::Struct { name: name_id, fields });
+    let ty = self.push_type(Type::Struct { name: ident, fields });
 
-    Ok(self.push_stmt(Stmt::StructDecl { ty }))
+    Ok(self.push_stmt(Stmt::StructDecl { tok: name_id, ty }))
   }
 
   pub fn parse_stmt(&mut self) -> ParseResult<StmtId> {

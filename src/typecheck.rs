@@ -7,6 +7,7 @@ struct Sym {
 
 type Scope = HashMap<IdentId, Sym>;
 
+// https://www.reasoning.page/2021/10/21/hindley-milner-type-inference-in-rust/
 struct TypeChecker<'a> {
   symtbl: Vec<Scope>,
   ast: &'a Ast<'a>,
@@ -54,10 +55,29 @@ impl<'a> TypeChecker<'a> {
         params_a.iter().zip(params_b.iter()).all(|(a, b)| self.ty_eq(*a, *b)) && self.ty_eq(*ret_a, *ret_b)
       }
       (Struct { name: name_a, fields: fields_a }, Struct { name: name_b, fields: fields_b }) => {
-        todo!("struct type eq")
+        name_a == name_b && fields_a.iter().zip(fields_b.iter()).all(|(a, b)| a.0 == b.0 && self.ty_eq(a.1, b.1))
       }
       _ => false,
     }
+  }
+
+  
+  pub fn ty_is_recursive(&self, root: TypeId) -> bool {
+    fn rec(tc: &TypeChecker, root: TypeId, id: TypeId) -> bool {
+      let curr = tc.ast.get_ty(id);
+
+      match curr {
+        Type::Array { inner, .. } => {
+          root == *inner || rec(tc, root, *inner)
+        }
+        Type::Struct { fields, .. } => {
+          fields.iter().any(|(_, param_ty)| root == *param_ty || rec(tc, root, *param_ty))
+        }
+        _ => false,
+      }
+    }
+    
+    rec(self, root, root)
   }
 
   fn err<S: Into<String>>(&self, msg: S, id: TokenId) -> FrontendErrAlias {
@@ -74,9 +94,9 @@ pub fn check(ast: &Ast) -> bool {
     symtbl: vec![HashMap::new()],
     errors: Vec::new()
   };
-  
-  typechecker.visit_stmt(typechecker.ast.top_lvl_id());
-  true
+
+  _ = typechecker.visit_stmt(typechecker.ast.top_lvl_id());
+  typechecker.errors.len() == 0
 }
 
 impl<'a> ast::Visitor<FrontendErrAlias> for TypeChecker<'a> {
@@ -161,7 +181,7 @@ impl<'a> ast::Visitor<FrontendErrAlias> for TypeChecker<'a> {
           (Type::Untyped, Type::Untyped) => return Err(self.err("could not infer types as both are unknown", *name)),
           (Type::Untyped, _) => expr_ty_id,
           (_, Type::Untyped) => *ty_id,
-          (a, b) => if self.ty_eq(*ty_id, expr_ty_id) {
+          (_, _) => if self.ty_eq(*ty_id, expr_ty_id) {
             // same type on both ends
             *ty_id
           } else {
@@ -190,7 +210,14 @@ impl<'a> ast::Visitor<FrontendErrAlias> for TypeChecker<'a> {
         Ok(())
       }
 
-      Stmt::StructDecl { ty } => todo!(),
+      Stmt::StructDecl { tok, ty } => {
+        // check for recursive struct declaration; that is not allowed
+        if self.ty_is_recursive(*ty) {
+          Err(self.err("declared recursive struct", *tok))
+        } else {
+          Ok(())
+        }
+      },
 
       Stmt::Assign { tok, lhs, rhs } => {
         let lty = self.visit_expr(*lhs)?;
@@ -235,9 +262,21 @@ impl<'a> ast::Visitor<FrontendErrAlias> for TypeChecker<'a> {
 
         Ok(())
       },
+
       Stmt::Return { expr } => todo!(),
 
       Stmt::Expr(id) => self.visit_expr(*id).map(|_| ()),
     }
+  }
+
+  fn visit_block(&mut self, ids: &[StmtId]) -> Result<(), FrontendErrAlias> {
+    for id in ids {
+      if let Err(e) = self.visit_stmt(*id) {
+        eprintln!("[TYPE ERR]: {e}");
+        self.errors.push(e);
+      }
+    }
+    
+    Ok(())
   }
 }
