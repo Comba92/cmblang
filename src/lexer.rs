@@ -93,6 +93,8 @@ impl TokenKind {
 #[derive(Debug, Clone)]
 pub struct Token {
   pub kind: TokenKind,
+  // TODO: move span into separate span vec in lexer
+  // TODO: if you do that, you could store token id here
   pub span: Span,
 }
 impl Token {
@@ -115,6 +117,10 @@ impl<'a> Lexer<'a> {
 
   pub fn get_tok(&self, id: TokenId) -> &Token {
     &self.tokens[id.0 as usize]
+  }
+
+  pub fn get_str(&'a self, t: Token) -> &'a str {
+    t.get_str(self)
   }
 
   pub fn str_from_id(&'a self, id: TokenId) -> &'a str {

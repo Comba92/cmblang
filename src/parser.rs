@@ -39,7 +39,7 @@ impl ExprLiteral {
 }
 
 #[derive(Debug)]
-pub enum Expr{
+pub enum Expr {
   Literal(ExprLiteral),
   Variable(TokenId, IdentId),
   Unary { op: TokenId, rhs: ExprId },
@@ -100,14 +100,21 @@ fn infix_lvl(kind: TokenKind) -> (i8, i8) {
 pub enum Stmt {
   Decl { name: TokenId, ident: IdentId, ty: TypeId, rhs: ExprId, constant: bool },
   FnDecl { name: TokenId, ident: IdentId, param_names: Vec<(TokenId, IdentId)>, ty: TypeId, block: StmtId },
-  StructDecl { tok: TokenId, ty: TypeId },
+  StructDecl { tok: TokenId, ident: IdentId, ty: TypeId },
 
   Assign { tok: TokenId, lhs: ExprId, rhs: ExprId },
-  Block { stmts: Vec<StmtId> },
+  Block(Vec<StmtId>),
   IfElse { tok: TokenId, cond: ExprId, iblock: StmtId, eblock: Option<StmtId> },
   While { tok: TokenId, cond: ExprId, wblock: StmtId },
-  Return { expr: ExprId },
+  Return { tok: TokenId, expr: ExprId },
   Expr(ExprId),
+}
+
+#[derive(Debug)]
+pub enum TopLvlStmt {
+  Decl { name: TokenId, ident: IdentId, ty: TypeId, rhs: ExprId, constant: bool },
+  FnDecl { name: TokenId, ident: IdentId, param_names: Vec<(TokenId, IdentId)>, ty: TypeId, block: StmtId },
+  StructDecl { tok: TokenId, ty: TypeId },
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
@@ -124,23 +131,26 @@ pub enum Type {
   Struct { name: IdentId, fields: Vec<(IdentId, TypeId)> },
 }
 
-pub struct TypeInfo {
-  kind: Type,
-  constant: bool,
-}
-
 pub struct Parser<'a> {
   cursor: Cursor<'a>,
 
   exprs: Vec<Expr>,
   stmts: Vec<Stmt>,
-  types: TypeInterner,
-  idents: StringInterner,
+  annotations: TypeInterner,
+  idents: StringInterner<IdentId>,
 
   errors: Vec<FrontendErr>,
 }
 
 type ParseResult<T> = Result<T, FrontendErrAlias>;
+
+
+
+// ================================================================================================================================== //
+// ================================================================================================================================== //
+// ================================================================================================================================== //
+
+
 
 pub mod ty_id {
   use super::TypeId;
@@ -165,7 +175,7 @@ impl<'a> Parser<'a> {
       cursor: Cursor { lexer, curr: 0 },
       exprs: Vec::new(),
       stmts: Vec::new(),
-      types,
+      annotations: types,
       idents: Default::default(),
 
       errors: Vec::new(),
@@ -174,7 +184,6 @@ impl<'a> Parser<'a> {
 
   pub fn err<S: Into<String>>(&self, msg: S, t: &Token) -> FrontendErrAlias {
     let err = t.to_err(msg, self.cursor.lexer);
-    // self.errors.push(err.clone());
     err
   }
 
@@ -192,21 +201,15 @@ impl<'a> Parser<'a> {
     StmtId(self.stmts.len() as u32 - 1)
   }
 
-  pub fn push_type(&mut self, ty: Type) -> TypeId {
-    // self.types.get(&ty)
-    //   .map(|x| *x)
-    //   .unwrap_or_else(|| {
-    //     self.types.insert(ty, self.types.len().into());
-    //     self.types.len().into()
-    //   })
-    self.types.intern(ty)
+  pub fn push_annotation(&mut self, ty: Type) -> TypeId {
+    self.annotations.intern(ty)
   }
 
-  pub fn push_ident(&mut self, tok: TokenId) -> IdentId {
-    self.idents.intern(self.cursor.lexer.str_from_id(tok))
+  pub fn push_ident(&mut self, tok: Token) -> IdentId {
+    self.idents.intern(tok.get_str(self.cursor.lexer))
   }
 
-  fn parse_type(&mut self) -> ParseResult<TypeId> {
+  fn parse_annot(&mut self) -> ParseResult<TypeId> {
     let t = self.cursor.eat();
     
     let ty = match t.kind {
@@ -219,20 +222,20 @@ impl<'a> Parser<'a> {
 
       TokenKind::ParenL => {
         let params = self.collect_listing(
-          Self::parse_type,
+          Self::parse_annot,
           TokenKind::Comma,
           TokenKind::ParenR,
           "unclosed parenthesis in function annotation's params")?;
  
         let ret = if self.cursor.eat_if(TokenKind::Arrow).is_some() {
-          self.parse_type()?
+          self.parse_annot()?
         } else { ty_id::VOID };
 
         Type::Func { params, ret }
       }
 
       TokenKind::BraceL => {
-        let inner = self.parse_type()?;
+        let inner = self.parse_annot()?;
         self.cursor.eat_match(TokenKind::Colon, "expect ':' after array inner type")?;
         
         // TODO: might be cool if this can be a constant integer expression?
@@ -250,7 +253,6 @@ impl<'a> Parser<'a> {
       }
 
       TokenKind::Ident => {
-        // TODO: is this necessary?
         let name = self.idents.intern(t.get_str(self.cursor.lexer));
         // we have to declare it elsewhere, do nothing
         Type::UserDef { name }
@@ -259,7 +261,7 @@ impl<'a> Parser<'a> {
       _ => return Err(self.err("invalid type annotation", &t)),
     };
 
-    Ok(self.push_type(ty))
+    Ok(self.push_annotation(ty))
   }
 
   fn collect_listing<T, F>(&mut self, getter: F, separator: TokenKind, terminator: TokenKind, err_unclosed: &str) -> ParseResult<Vec<T>>
@@ -299,7 +301,7 @@ impl<'a> Parser<'a> {
       Keyword(KeywordKind::False) => self.push_expr(Expr::Literal(ExprLiteral::Bool(tok_id))),
 
       Ident => {
-        let ident_id = self.push_ident(tok_id);
+        let ident_id = self.push_ident(t);
         self.push_expr(Expr::Variable(tok_id, ident_id))
       }
 
@@ -369,7 +371,7 @@ impl<'a> Parser<'a> {
     Ok(stmt)
   }
 
-  fn parse_decl(&mut self, name: TokenId, constant: bool) -> ParseResult<StmtId> {
+  fn parse_decl(&mut self, name: Token, id: TokenId, constant: bool) -> ParseResult<StmtId> {
     let ident = self.push_ident(name);
 
     // eat ':'
@@ -379,7 +381,7 @@ impl<'a> Parser<'a> {
       self.cursor.advance();
       ty_id::UNTYPED
     } else {
-      let id = self.parse_type()?;
+      let id = self.parse_annot()?;
 
       // eat '='
       self.cursor.eat_match(TokenKind::Assign, "expect '=' after type annotation")?;
@@ -388,7 +390,7 @@ impl<'a> Parser<'a> {
 
     let rhs = self.parse_expr(0)?;
 
-    let stmt = self.push_stmt(Stmt::Decl { name, ident, ty: ty_id, rhs, constant });
+    let stmt = self.push_stmt(Stmt::Decl { name: id, ident, ty: ty_id, rhs, constant });
     Ok(stmt)
   }
 
@@ -405,7 +407,7 @@ impl<'a> Parser<'a> {
     let id = self.cursor.curr_id();
     self.cursor.advance();
     
-    self.parse_decl(id, true)
+    self.parse_decl(name, id, true)
   }
 
   fn parse_block(&mut self) -> ParseResult<StmtId> {
@@ -416,7 +418,7 @@ impl<'a> Parser<'a> {
     while self.cursor.has_some() {
       if self.cursor.peek().kind == TokenKind::CurlyR {
         self.cursor.advance();
-        return Ok(self.push_stmt(Stmt::Block { stmts }))
+        return Ok(self.push_stmt(Stmt::Block(stmts)))
       }
 
       let id = self.parse_stmt()?;
@@ -453,29 +455,29 @@ impl<'a> Parser<'a> {
   fn parse_func(&mut self) -> ParseResult<StmtId> {
     self.cursor.advance();
 
-    self.cursor.eat_match(TokenKind::Ident, "expect name after 'fn' keyword")?;
-    let name = self.cursor.prev_id();
+    let name = self.cursor.eat_match(TokenKind::Ident, "expect name after 'fn' keyword")?;
+    let name_id = self.cursor.prev_id();
     let ident = self.push_ident(name);
     
     self.cursor.eat_match(TokenKind::ParenL, "expect '(' after function name")?;
 
     let params = self.collect_listing(
       |p| {
-        p.cursor.eat_match(TokenKind::Ident, "expect param name in function signature")?;
-        let name = p.cursor.prev_id();
+        let name = p.cursor.eat_match(TokenKind::Ident, "expect param name in function signature")?;
+        let name_id = p.cursor.prev_id();
         let ident = p.push_ident(name);
 
         p.cursor.eat_match(TokenKind::Colon, "expect ':' after param name")?;
-        let ty = p.parse_type()?;
+        let ty = p.parse_annot()?;
 
-        Ok(((name, ident), ty))
+        Ok(((name_id, ident), ty))
       },
       TokenKind::Comma,
       TokenKind::ParenR,
       "unclosed parenthesis in function declaration's parameters")?;
 
     let ret = if self.cursor.eat_if(TokenKind::Arrow).is_some() {
-      self.parse_type()?
+      self.parse_annot()?
     } else {
       ty_id::VOID
     };
@@ -484,28 +486,27 @@ impl<'a> Parser<'a> {
 
     let (param_names, param_types) = params.into_iter().unzip();
     let ty = Type::Func { params: param_types, ret };
-    let ty_id = self.push_type(ty);
+    let ty_id = self.push_annotation(ty);
 
-    Ok(self.push_stmt(Stmt::FnDecl { name, ident, param_names, ty: ty_id, block }))
+    Ok(self.push_stmt(Stmt::FnDecl { name: name_id, ident, param_names, ty: ty_id, block }))
   }
 
   fn parse_struct(&mut self) -> ParseResult<StmtId> {
     self.cursor.advance();
 
-    self.cursor.eat_match(TokenKind::Ident, "expect struct name after 'struct' keyword")?;
+    let name = self.cursor.eat_match(TokenKind::Ident, "expect struct name after 'struct' keyword")?;
     let name_id = self.cursor.prev_id();
-    let ident = self.push_ident(name_id);
+    let ident = self.push_ident(name);
 
     self.cursor.eat_match(TokenKind::CurlyL, "expect '{' after struct name")?;
   
     let fields = self.collect_listing(
       |p| {
-        p.cursor.eat_match(TokenKind::Ident, "expect field name in struct declaration")?;
-        let id = p.cursor.prev_id();
-        let ident = p.push_ident(id);
+        let name = p.cursor.eat_match(TokenKind::Ident, "expect field name in struct declaration")?;
+        let ident = p.push_ident(name);
 
         p.cursor.eat_match(TokenKind::Colon, "expect ':' after name in struct declaration")?;
-        let ty = p.parse_type()?;
+        let ty = p.parse_annot()?;
 
         Ok((ident, ty))
       },
@@ -513,24 +514,24 @@ impl<'a> Parser<'a> {
       TokenKind::CurlyR,
       "expect '}' after struct fields")?;
 
-    let ty = self.push_type(Type::Struct { name: ident, fields });
+    let ty = self.push_annotation(Type::Struct { name: ident, fields });
 
-    Ok(self.push_stmt(Stmt::StructDecl { tok: name_id, ty }))
+    Ok(self.push_stmt(Stmt::StructDecl { tok: name_id, ident, ty }))
   }
 
-  pub fn parse_stmt(&mut self) -> ParseResult<StmtId> {
+  fn parse_stmt(&mut self) -> ParseResult<StmtId> {
     let t = self.cursor.peek();
+    let id = self.cursor.curr_id();
 
     let s = match t.kind {
       TokenKind::Ident => {
         // we peeked an ident. this either means lvalue, or rvalue expression
-        let tok_id = self.cursor.curr_id();
         let lhs = self.parse_expr(0)?;
 
         let op = self.cursor.peek();
         match op.kind {
           TokenKind::Assign => self.parse_assign(lhs)?,
-          TokenKind::Colon => self.parse_decl(tok_id, false)?,
+          TokenKind::Colon => self.parse_decl(t, id, false)?,
           _ => {
             // expression
             self.push_stmt(Stmt::Expr(lhs))
@@ -546,12 +547,16 @@ impl<'a> Parser<'a> {
         KeywordKind::While => self.parse_while()?,
         KeywordKind::Fn => self.parse_func()?,
         KeywordKind::Return => {
+          let tok = self.cursor.curr_id();
           self.cursor.advance();
           let expr = self.parse_expr(0)?;
-          self.push_stmt(Stmt::Return { expr })
+          self.push_stmt(Stmt::Return { tok, expr })
         }
         KeywordKind::Struct => self.parse_struct()?,
-        _ => return Err(self.err("invalid keyword", &t)),
+        _ => {
+          self.cursor.advance();
+          return Err(self.err("invalid keyword", &t))
+        }
       }
 
       _ => {
@@ -562,6 +567,25 @@ impl<'a> Parser<'a> {
     };
 
     if let Some(_) = self.cursor.eat_if(TokenKind::Semicolon) {}
+
+    Ok(s)
+  }
+
+  fn parse_top_lvl(&mut self) -> ParseResult<StmtId> {
+    let t = self.cursor.peek();
+
+    let s = match t.kind {
+      TokenKind::Keyword(k) => match k {
+        KeywordKind::Const => self.parse_const()?,
+        KeywordKind::Fn => self.parse_func()?,
+        _ => {
+          self.cursor.advance();
+          return Err(self.err("invalid keyword at top level", &t))
+        }
+      }
+
+      _ => return Err(self.err("invalid top level statment", &t)),
+    };
 
     Ok(s)
   }
@@ -602,12 +626,12 @@ pub fn parse(src: &str) -> crate::ast::Ast {
     }
   }
 
-  p.stmts.push(Stmt::Block { stmts: top_lvl });
+  p.stmts.push(Stmt::Block(top_lvl));
 
   crate::ast::Ast {
     exprs: p.exprs,
     stmts: p.stmts,
-    types: p.types,
+    types: p.annotations,
     idents: p.idents,
     lexer,
   }

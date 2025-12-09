@@ -1,4 +1,4 @@
-use std::{error::{self, Error}, fmt, fs};
+use std::{error, fmt, fs};
 
 pub type FrontendErrAlias = FrontendErr;
 pub type IdSize = u32;
@@ -65,10 +65,10 @@ trait CursorIter<Inner, Mapped> {
   fn has_some(&self) -> bool { self.curr() < self.start().len() }
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<(), Box<dyn error::Error>> {
   let src = fs::read_to_string("test.cmb")?;
 
-  let parser = parser::parse(&src);
+  let mut parser = parser::parse(&src);
   // parser.tokens.iter().enumerate().for_each(|(i, t)| println!("{i}: {t:?}"));
   // println!();
   // println!();
@@ -81,7 +81,9 @@ fn main() -> Result<(), Box<dyn Error>> {
   println!("{:?}", parser.types);
   println!("{:?}", parser.idents);
 
-  let typecheck = typecheck::check(&parser);
+  let typecheck = typecheck::check(&mut parser);
+  typecheck.symtbl.iter() .enumerate().for_each(|(i, ty)| println!("{i}: {ty:?}"));
+
 
   Ok(())
 }
