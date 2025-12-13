@@ -2,6 +2,8 @@ use std::{error, fmt};
 
 mod lexer;
 mod parser;
+mod ast;
+mod typechecker;
 
 pub type FrontendErrAlias = FrontendErr;
 pub type IdSize = u32;
@@ -69,14 +71,15 @@ fn main() {
   println!("Hello World!");
 
   let src = include_str!("../test.cmb");
-  let lexer = lexer::tokenize(src).unwrap();
+  // let lexer = lexer::tokenize(src).unwrap();
 
   // for tok in lexer.tokens.iter() {
   //   println!("{tok:?}");
   // }
 
-  let ast = parser::parse(src).unwrap();
-
+  let mut ast = parser::parse(src).unwrap();
+  typechecker::check(&mut ast);
+  
   for expr in ast.exprs {
     println!("{expr:?}");
   }
@@ -92,10 +95,10 @@ fn main() {
   }
   println!();
 
-  for ty in ast.annots {
+  for ty in ast.types.types {
     println!("{ty:?}");
   }
   println!();
 
-  println!("{:?}", ast.idents.buf)
+  println!("{:?}", ast.idents.buf);
 }

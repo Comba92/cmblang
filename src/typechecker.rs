@@ -1,92 +1,20 @@
-use std::{collections::HashMap, hash::Hash};
-use crate::{FrontendErr, FrontendErrAlias, IdSize, lexer::Span, parser::{self, Ast, Expr, ExprId, ExprLiteral, IdentId, Stmt, StmtId, StmtTopLvl, TyAnnot, TyAnnotId}};
+use std::collections::HashMap;
+use crate::{FrontendErr, FrontendErrAlias, ast::{Ast, IdentId, Type, TypeId, ty_id}, lexer::Span, parser::{self, Expr, ExprId, ExprLiteral, Stmt, StmtId, StmtTopLvl}};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct TypeId(IdSize);
 type Scope = HashMap<IdentId, TypeId>;
 
-#[derive(Debug, PartialEq, Eq, Hash)]
-enum Type {
-  Untyped,
-  Void,
-  Bool,
-  Int,
-  Float,
-  Array { inner: TypeId, len: u32 },
-  Func { params: Vec<TypeId>, ret: TypeId },
-  // struct name is stored as key in hashmap
-  Struct { fields: Vec<(IdentId, TypeId)> }
-}
-
-pub mod ty_id {
-  use super::TypeId;
-
-  pub const UNTYPED:  TypeId = TypeId(0);
-  pub const VOID:     TypeId = TypeId(1);
-  pub const BOOL:     TypeId = TypeId(2);
-  pub const INT:      TypeId = TypeId(3);
-  pub const FLOAT:    TypeId = TypeId(4);
-}
-
-struct TypeEnv {
-  userdefs: HashMap<IdentId, TypeId>,
-  types: Vec<Type>,
-}
-impl TypeEnv {
-  fn new() -> Self {
-    Self {
-      userdefs: HashMap::new(),
-      types: vec![
-        Type::Untyped,
-        Type::Void,
-        Type::Bool,
-        Type::Int,
-        Type::Float,
-      ],
-    }
-  }
-
-  fn lookup(&self, id: IdentId) -> &Type {
-    &self.types[self.userdefs[&id].0 as usize]
-  }
-
-  fn lookup_mut(&mut self, id: IdentId) -> &mut Type {
-    &mut self.types[self.userdefs[&id].0 as usize]
-  }
-
-  fn get(&self, id: TypeId) -> &Type {
-    &self.types[id.0 as usize]
-  }
-
-  fn get_mut(&mut self, id: TypeId) -> &mut Type {
-    &mut self.types[id.0 as usize]
-  }
-
-  // true if was already present
-  fn add_userdef(&mut self, name: IdentId, ty: Type) -> (TypeId, bool) {
-    if let Some(id) = self.userdefs.get(&name) {
-      (*id, true)
-    } else {
-      let id = TypeId(self.types.len() as IdSize);
-      self.types.push(ty);
-      self.userdefs.insert(name, id);
-      (id, false)
-    }
-  }
-
-  fn add_ty(&mut self, ty: Type) -> TypeId {
-    self.types.push(ty);
-    TypeId(self.types.len() as IdSize - 1)
-  }
-}
-
-struct Typechecker<'a> {
+struct Typechecker {
   tbl: Vec<Scope>,
-  types: TypeEnv,
-  ast: &'a Ast<'a>,
+}
+impl Default for Typechecker {
+  fn default() -> Self {
+    Self {
+      tbl: vec![HashMap::new()]
+    }
+  }
 }
 
-impl<'a> Typechecker<'a> {
+impl Typechecker {
   fn top_scope(&self) -> &Scope {
     let len = self.tbl.len()-1;
     &self.tbl[len]
@@ -105,8 +33,8 @@ impl<'a> Typechecker<'a> {
     self.tbl.pop();
   }
 
-  fn err<S: Into<String>>(&self, msg: S, span: Span) -> FrontendErrAlias {
-    let err = FrontendErr::new(&self.ast.lexer, msg, span);
+  fn err<S: Into<String>>(&self, ast: &Ast, msg: S, span: Span) -> FrontendErrAlias {
+    let err = FrontendErr::new(&ast.lexer, msg, span);
     err
   }
 
@@ -114,24 +42,28 @@ impl<'a> Typechecker<'a> {
     self.top_scope_mut().insert(name, ty).is_some()
   }
 
-  fn get_var_ty(&self, ident: IdentId) -> Option<&Type> {
-    self.top_scope()
-      .get(&ident)
-      .map(|id| self.types.get(*id))
+  fn get_var(&self, ident: IdentId) -> Option<TypeId> {
+    self.top_scope().get(&ident).copied()
   }
 
-  fn check_expr(&mut self, id: ExprId) -> Result<&Type, FrontendErrAlias> {
-    let (e, span) = &self.ast.exprs[id.0 as usize];
+  fn get_var_ty<'a, 'b>(&'b self, ast: &'a Ast, ident: IdentId) -> Option<&'a Type> {
+    self.top_scope()
+      .get(&ident)
+      .map(|id| ast.types.get(*id))
+  }
+
+  fn check_expr<'a, 'b>(&'b mut self, ast: &'a Ast, id: ExprId) -> Result<TypeId, FrontendErrAlias> {
+    let (e, span) = &ast.exprs[id.0 as usize];
     let res = match e {
       Expr::Literal(lit) => match lit {
-        ExprLiteral::Int(_) => &Type::Int,
-        ExprLiteral::Float(_) => &Type::Float,
-        ExprLiteral::Bool(_) => &Type::Bool,
+        ExprLiteral::Bool(_) => ty_id::BOOL,
+        ExprLiteral::Int(_) => ty_id::INT,
+        ExprLiteral::Float(_) => ty_id::FLOAT,
         ExprLiteral::Array(items) => todo!(),
       },
       Expr::Variable(ident) => {
-        self.get_var_ty(*ident)
-          .ok_or_else(|| self.err("undeclared variable", *span))?
+        self.get_var(*ident)
+          .ok_or_else(|| self.err(ast, "undeclared variable", *span))?
       },
       Expr::Unary { op, rhs } => todo!(),
       Expr::Binary { op, lhs, rhs } => todo!(),
@@ -143,26 +75,26 @@ impl<'a> Typechecker<'a> {
     Ok(res)
   }
 
-  fn check_stmt(&mut self, id: StmtId) -> Result<(), FrontendErrAlias> {
-    let (s, span) = &self.ast.stmts[id.0 as usize];
+  fn check_stmt(&mut self, ast: &Ast, id: StmtId) -> Result<(), FrontendErrAlias> {
+    let (s, span) = &ast.stmts[id.0 as usize];
     match s {
       Stmt::Decl(decl) => todo!(),
       Stmt::Assign { lhs, rhs } => {
-        let lty = self.check_expr(*lhs)?;
-        let rty = self.check_expr(*rhs)?;
+        let lty = self.check_expr(ast, *lhs)?;
+        let rty = self.check_expr(ast, *rhs)?;
         todo!()
       },
-      Stmt::Block(items) => self.check_block(items),
+      Stmt::Block(items) => self.check_block(ast, items),
       Stmt::IfElse { cond, iblock, eblock } => todo!(),
       Stmt::While { cond, wblock } => todo!(),
       Stmt::Return(_) => todo!(),
-      Stmt::Expr(id) => self.check_expr(*id),
+      Stmt::Expr(id) => self.check_expr(ast, *id).map(|_| {}),
     }
   }
 
-  fn check_block(&mut self, stmts: &[StmtId]) -> Result<(), FrontendErrAlias> {
+  fn check_block(&mut self, ast: &Ast, stmts: &[StmtId]) -> Result<(), FrontendErrAlias> {
     for s in stmts {
-      if let Err(err) = self.check_stmt(*s) {
+      if let Err(err) = self.check_stmt(ast, *s) {
         eprintln!("[TYPE ERR] {err}");
       }
     }
@@ -170,49 +102,86 @@ impl<'a> Typechecker<'a> {
     Ok(())
   }
 
-  fn check_decl(&mut self, decl: &parser::Decl) {
-    todo!()
+  fn check_decl(&mut self, ast: &Ast, decl: &parser::Decl, span: Span) -> Result<(), FrontendErrAlias> {
+    let decl_ty = ast.types.get(decl.annot);
+    let rty_id = self.check_expr(ast, decl.rhs)?;
+    let rty = ast.types.get(rty_id);
+
+    let res = match (decl_ty, rty) {
+      (Type::Untyped, Type::Untyped) => return Err(self.err(ast, "could not infer types as both are unknown", span)),
+      (Type::Untyped, _) => rty_id,
+      (_, Type::Untyped) => decl.annot,
+      (_, _) => if decl_ty == rty {
+        // same type on both ends
+        decl.annot
+      } else {
+        // different type
+        return Err(self.err(ast, "different types provided in declaration", span))
+      }
+    };
+
+    self.add_var(decl.ident, res);
+    Ok(())
   }
 
-  fn check_toplvl(&mut self) {
+  fn check_toplvl(&mut self, ast: &mut Ast) {
     // first, add all declared userdefs (structs)
-    for (stmt, span) in &self.ast.toplvl {
+    for (stmt, span) in &ast.toplvl {
       match stmt {
-        // StmtTopLvl::Decl(decl) => {
-        //   self.add_var(decl.ident, ty_id::UNTYPED);
-        // }
-        // StmtTopLvl::FnDecl { name, .. } => { 
-        //   self.add_var(*name, ty_id::UNTYPED);
-        // }
         StmtTopLvl::Decl(_) | StmtTopLvl::FnDecl { .. } => {}
 
-        StmtTopLvl::StructDecl { name, .. } => {
-          let (_, present) = self.types.add_userdef(*name, Type::Struct { fields: Vec::new() });
+        StmtTopLvl::StructDecl { name, fields } => {
+          // parse fields
+          // TODO: we're cloning here, not really sure
+          let (_, present) = ast.types.add_userdef(*name, Type::Struct { name: *name, fields: fields.clone() });
+        
           if present {
-            self.err("already declared struct", *span);
+            let e = self.err(ast, "already declared struct", *span);
+            eprintln!("[TYPE ERR] {e}");
           }
         }
       }
     }
 
     // now we can parse the top level declarations
-    for (stmt, span) in &self.ast.toplvl {
+    for (stmt, span) in &ast.toplvl {
       match stmt {
-        StmtTopLvl::Decl(decl) => self.check_decl(decl),
-        StmtTopLvl::FnDecl { name, params, ret, block } => { 
-          // parse params, ret, and block
-          let param_types = params.iter().map(|(_, ty)| *ty).collect();
-          let ty = Type::Func { params: param_types, ret:  }
+        StmtTopLvl::Decl(decl) => {
+          if let Err(e) = self.check_decl(ast, decl, *span) {
+            eprintln!("[TYPE ERR] {e}");
+          }
         }
 
-        StmtTopLvl::StructDecl { name, fields } => {
-          // parse fields
+        StmtTopLvl::FnDecl { name, params, ret, block } => { 
+          // parse params, ret, and block
+          let param_types = params.iter().map(|param| param.1).collect();
+          let ty = Type::Func { params: param_types, ret: *ret };
+          let ty_id = ast.types.add_ty(ty);
+          
+          if self.add_var(*name, ty_id) {
+            let e = self.err(ast, "already declared func", *span);
+            eprintln!("[TYPE ERR] {e}");
+            continue;
+          }
+
+          self.push_scope();
+          for param in params {
+            self.add_var(param.0, param.1);
+          }
+          
+          if let Err(e) = self.check_stmt(ast, *block) {
+            eprintln!("[TYPE ERR] {e}");
+          }
+          self.pop_scope();
         }
+
+        StmtTopLvl::StructDecl { .. } => {}
       }
     }
   }
 }
 
-pub fn typecheck(ast: &mut Ast) -> bool {
-
+pub fn check(ast: &mut Ast) {
+  let mut typechecker = Typechecker::default();
+  typechecker.check_toplvl(ast);
 }

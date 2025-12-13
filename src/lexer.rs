@@ -112,6 +112,10 @@ impl<'a> Lexer<'a> {
     let span = Span { start: self.src.len() as u32, end: self.src.len() as u32 };
     Token { kind: TokenKind::Eof, span }
   }
+
+  pub fn get_str(&self, t: Token) -> &str {
+    &self.src[t.span.start as usize .. t.span.end as usize]
+  }
 }
 
 pub struct Cursor<'a> {
