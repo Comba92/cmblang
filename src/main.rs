@@ -1,12 +1,10 @@
-use std::{error, fmt, fs};
-
-pub type FrontendErrAlias = FrontendErr;
-pub type IdSize = u32;
+use std::{error, fmt};
 
 mod lexer;
 mod parser;
-mod ast;
-mod typecheck;
+
+pub type FrontendErrAlias = FrontendErr;
+pub type IdSize = u32;
 
 #[derive(Debug, Clone)]
 pub struct FrontendErr {
@@ -17,7 +15,7 @@ pub struct FrontendErr {
   line: usize,
 }
 impl FrontendErr {
-  pub fn new(lexer: &lexer::Lexer, msg: String, span: lexer::Span) -> Self {
+  pub fn new<S: Into<String>>(lexer: &lexer::Lexer, msg: S, span: lexer::Span) -> Self {
     // TODO: consider evaluating this lazily, computing column and line only when it is printed
     // TODO: is binary search really that fast?
     let line = match lexer.line_offsets.binary_search(&span.start) {
@@ -31,7 +29,7 @@ impl FrontendErr {
     let column = (span.start - lexer.line_offsets[line]) as usize;
     
     Self {
-      msg,
+      msg: msg.into(),
       str: span.get_str(lexer.src).to_owned(),
       span,
       line,
@@ -47,43 +45,57 @@ impl fmt::Display for FrontendErr {
 }
 impl error::Error for FrontendErr {}
 
-trait CursorIter<Inner, Mapped> {
-  fn peek(&self) -> Mapped { self.peek_nth(0) }
-  fn peek_nth(&self, nth: usize) -> Mapped;
+trait CursorIter<Inner> {
+  fn peek(&self) -> Inner { self.peek_nth(0) }
+  fn peek_nth(&self, nth: usize) -> Inner;
   fn advance(&mut self) { self.advance_nth(1); }
-  fn advance_nth(&mut self, n: usize) { *self.curr_mut() += n; }
-  fn eat(&mut self) -> Mapped {
+  fn advance_nth(&mut self, n: usize) { *self.curr_mut() += n as u32; }
+  fn undo(&mut self) { *self.curr_mut() -= 1; }
+
+  fn eat(&mut self) -> Inner {
     let res = self.peek();
     self.advance();
     res
   }
 
   fn start(&self) -> &[Inner];
-  fn slice(&self) -> &[Inner] { &self.start()[self.curr()..] }
-  fn curr(&self) -> usize;
-  fn curr_mut(&mut self) -> &mut usize;
-  fn has_some(&self) -> bool { self.curr() < self.start().len() }
+  fn slice(&self) -> &[Inner] { &self.start()[self.curr() as usize..] }
+  fn curr(&self) -> u32;
+  fn curr_mut(&mut self) -> &mut u32;
+  fn has_some(&self) -> bool { self.curr() < self.start().len() as u32 }
 }
 
-fn main() -> Result<(), Box<dyn error::Error>> {
-  let src = fs::read_to_string("test.cmb")?;
+fn main() {
+  println!("Hello World!");
 
-  let mut parser = parser::parse(&src);
-  // parser.tokens.iter().enumerate().for_each(|(i, t)| println!("{i}: {t:?}"));
-  // println!();
-  // println!();
+  let src = include_str!("../test.cmb");
+  let lexer = lexer::tokenize(src).unwrap();
 
-  // parser.exprs.iter() .enumerate().for_each(|(i, e)| println!("{i}: {e:?}"));
-  // println!();  
-  // parser.stmts.iter() .enumerate().for_each(|(i, s)| println!("{i}: {s:?}"));
-  // println!();
-  // parser.types.buf.iter() .enumerate().for_each(|(i, ty)| println!("{i}: {ty:?}"));
-  println!("{:?}", parser.types);
-  println!("{:?}", parser.idents);
+  // for tok in lexer.tokens.iter() {
+  //   println!("{tok:?}");
+  // }
 
-  let typecheck = typecheck::check(&mut parser);
-  typecheck.symtbl.iter() .enumerate().for_each(|(i, ty)| println!("{i}: {ty:?}"));
+  let ast = parser::parse(src).unwrap();
 
+  for expr in ast.exprs {
+    println!("{expr:?}");
+  }
+  println!();
 
-  Ok(())
+  for stmt in ast.toplvl {
+    println!("{stmt:?}");
+  }
+  println!();
+
+  for stmt in ast.stmts {
+    println!("{stmt:?}");
+  }
+  println!();
+
+  for ty in ast.annots {
+    println!("{ty:?}");
+  }
+  println!();
+
+  println!("{:?}", ast.idents.buf)
 }

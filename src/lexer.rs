@@ -1,12 +1,6 @@
 use std::{collections::HashMap, sync::LazyLock};
 use strum::IntoEnumIterator;
-use crate::{CursorIter, IdSize};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TokenId(pub IdSize);
-impl From<usize> for TokenId {
-  fn from(value: usize) -> Self { Self(value as IdSize) }
-}
+use crate::{CursorIter, FrontendErr, IdSize};
 
 static KEYWORDS: LazyLock<HashMap<String, KeywordKind>> = LazyLock::new(|| {
   let mut map = HashMap::new();
@@ -18,7 +12,7 @@ static KEYWORDS: LazyLock<HashMap<String, KeywordKind>> = LazyLock::new(|| {
   map
 });
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct Span {
   pub start: u32,
   pub end: u32,
@@ -36,12 +30,14 @@ pub enum KeywordKind {
   Struct,
   True, False,
   And, Or, Not,
-  Const, Int, Float, Bool,
+  Let, Const,
+  Int, Float, Bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
-  Err(char),
+  #[default]
+  Err,
   Eof,
 
   Assign,
@@ -62,8 +58,9 @@ pub enum TokenKind {
 
   Keyword(KeywordKind),
   Ident,
-  IntLit(u64),
-  FloatLit(f64),
+
+  IntLit,
+  FloatLit,
 }
 impl TokenKind {
   pub fn is_op(&self) -> bool {
@@ -82,27 +79,27 @@ impl TokenKind {
   pub fn is_safe(&self) -> bool {
     use TokenKind::*;
     
+    self.is_safe_toplvl() || match self {
+      Comma | ParenL | BraceL | CurlyL |
+      Keyword(KeywordKind::If) | Keyword(KeywordKind::Else) | Keyword(KeywordKind::While) => true,
+      _ => false,
+    }
+  }
+
+  pub fn is_safe_toplvl(&self) -> bool {
+    use TokenKind::*;
+
     match self {
-      Semicolon | Comma | ParenL | BraceL | CurlyL | Keyword(KeywordKind::If) |
-      Keyword(KeywordKind::While) | Keyword(KeywordKind::Fn) => true,
+      Semicolon | Keyword(KeywordKind::Fn) | Keyword(KeywordKind::Struct) => true,
       _ => false,
     }
   }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Token {
   pub kind: TokenKind,
-  // TODO: move span into separate span vec in lexer
-  // TODO: if you do that, you could store token id here
   pub span: Span,
-}
-impl Token {
-  pub fn to_err<S: Into<String>>(&self, msg: S, lexer: &Lexer) -> crate::FrontendErrAlias {
-    crate::FrontendErr::new(lexer, msg.into(), self.span.clone())
-  }
-
-  pub fn get_str<'a, 'b>(&'a self, lex: &'b Lexer<'b>) -> &'b str { self.span.get_str(lex.src) }
 }
 
 pub struct Lexer<'a> {
@@ -112,51 +109,42 @@ pub struct Lexer<'a> {
 }
 impl<'a> Lexer<'a> {
   pub fn eof(&self) -> Token {
-    Token { kind: TokenKind::Eof, span: Span { start: self.src.len() as u32, end: self.src.len() as u32 } }
-  }
-
-  pub fn get_tok(&self, id: TokenId) -> &Token {
-    &self.tokens[id.0 as usize]
-  }
-
-  pub fn get_str(&'a self, t: Token) -> &'a str {
-    t.get_str(self)
-  }
-
-  pub fn str_from_id(&'a self, id: TokenId) -> &'a str {
-    self.tokens[id.0 as usize].get_str(self)
+    let span = Span { start: self.src.len() as u32, end: self.src.len() as u32 };
+    Token { kind: TokenKind::Eof, span }
   }
 }
 
 pub struct Cursor<'a> {
   bytes: &'a [u8],
-  curr: usize,
+  curr: u32,
 }
 
-impl<'a> CursorIter<u8, char> for Cursor<'a> {
-  fn peek_nth(&self, nth: usize) -> char {
-    self.bytes.get(self.curr + nth).copied().unwrap_or_default() as char
+impl<'a> CursorIter<u8> for Cursor<'a> {
+  fn peek_nth(&self, nth: usize) -> u8 {
+    self.bytes.get(self.curr as usize + nth).copied().unwrap_or_default()
   }
 
   fn start(&self) -> &[u8] { self.bytes }
-  fn curr(&self) -> usize { self.curr }
-  fn curr_mut(&mut self) -> &mut usize { &mut self.curr }
+  fn curr(&self) -> u32 { self.curr }
+  fn curr_mut(&mut self) -> &mut u32 { &mut self.curr }
 }
 
 impl<'a> Cursor<'a> {
   pub fn match2_or1(&mut self, target: char, m: TokenKind, o: TokenKind) -> TokenKind  {
-    if self.peek_nth(1) == target {
+    if self.peek_nth(1) == target as u8 {
       // eat second char
       self.advance();
       m
-    } else {
-      o
-    }
+    } else { o }
+  }
+
+  pub fn eat_if(&mut self, target: u8) -> Option<u8> {
+    (self.peek() == target).then(|| self.eat())
   }
 }
 
-pub fn tokenize(src: &str) -> Lexer {
-  let mut lexer = Lexer { src, tokens: Vec::new(), line_offsets: vec![0] };
+pub fn tokenize(src: &str) -> Result<Lexer, FrontendErr> {
+  let mut lexer = Lexer { src, tokens: vec![], line_offsets: vec![0] };
   let mut cursor = Cursor {bytes: src.as_bytes(), curr: 0};
   
   'start: while cursor.has_some() {
@@ -166,9 +154,9 @@ pub fn tokenize(src: &str) -> Lexer {
     cursor.advance_nth(spaces);
     if !cursor.has_some() { break }
 
-    let start = cursor.curr();
+    let start = cursor.curr() as usize;
     let mut len = 1;
-    let c = cursor.peek();
+    let c = cursor.peek() as char;
 
     let kind = match c {
       '+' => TokenKind::Plus,
@@ -194,15 +182,38 @@ pub fn tokenize(src: &str) -> Lexer {
       '<' => cursor.match2_or1('=', TokenKind::LessEq, TokenKind::Less),
       '>' => cursor.match2_or1('=', TokenKind::GreatEq, TokenKind::Great),
 
-      '/' => if cursor.peek_nth(1) == '/' {
+      '/' => if cursor.peek_nth(1) as char == '/' {
         len = cursor.slice().iter()
           .take_while(|c| **c != b'\n')
           .count();
 
         cursor.advance_nth(len);
         continue 'start;
-      } else if cursor.peek_nth(1) == '*' {
-        todo!("block comment")
+      } else if cursor.peek_nth(1) as char == '*' {
+        let mut openings = vec![cursor.curr()];
+        
+        // eat first '/*'
+        cursor.advance_nth(2);
+
+        while cursor.has_some() {
+          let c = cursor.eat() as char;
+          if c == '/' && cursor.eat_if(b'*').is_some() {
+            openings.push(cursor.curr()-2);
+          } else if c == '*' && cursor.eat_if(b'/').is_some() {
+            openings.pop();
+          } else if c == '\n' {
+            lexer.line_offsets.push(cursor.curr() as u32-1);
+          }
+
+          if openings.len() == 0 { break; }
+        }
+
+        if openings.len() > 0 {
+          let start = openings.pop().unwrap() as u32;
+          return Err(FrontendErr::new(&lexer, "unclosed block comment", Span { start, end: start + 2 }))
+        }
+
+        continue 'start;
       } else {
         TokenKind::Slash
       }
@@ -223,16 +234,13 @@ pub fn tokenize(src: &str) -> Lexer {
       c if c.is_ascii_digit() => {
         len = 0;
         while cursor.peek_nth(len).is_ascii_digit() { len += 1; }
-        if cursor.peek_nth(len) == '.' {
+        if cursor.peek_nth(len) as char == '.' {
           // float
           len += 1;
           while cursor.peek_nth(len).is_ascii_digit() { len += 1; }
-          let n: f64 = src[start..start + len].parse().unwrap();
-          TokenKind::FloatLit(n)
+          TokenKind::FloatLit
         } else {
-          // int
-          let n: u64 = src[start..start + len].parse().unwrap();
-          TokenKind::IntLit(n)
+          TokenKind::IntLit
         }
       }
 
@@ -242,17 +250,15 @@ pub fn tokenize(src: &str) -> Lexer {
         continue 'start;
       }
 
-      _ => TokenKind::Err(c),
+      _ => TokenKind::Err,
     };
 
-    let t = Token {
-      kind,
-      span: Span { start: start as u32, end: (start + len) as u32 }
-    };
-
-    lexer.tokens.push(t);
+    
+    let span = Span { start: start as u32, end: (start + len) as u32 };
+    lexer.tokens.push(Token { kind, span });
+    
     cursor.advance_nth(len);
   }
-
-  lexer
+  
+  Ok(lexer)
 }
