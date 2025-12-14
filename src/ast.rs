@@ -68,6 +68,7 @@ pub enum Type {
   Func { params: Vec<TypeId>, ret: TypeId },
   Struct { name: IdentId, fields: Vec<(IdentId, TypeId)> },
   UserDef,
+  Generic(u8),
 }
 
 pub mod ty_id {
@@ -127,8 +128,6 @@ impl TypeEnv {
       // if we had an userdef, we have just inserted the real type
       (*id, !matches!(old, Type::UserDef))
     } else {
-      // let id = TypeId(self.types.len() as IdSize);
-      // self.types.push(ty);
       let id = self.add_ty(ty);
       self.userdefs.insert(name, id);
       (id, false)
@@ -138,5 +137,31 @@ impl TypeEnv {
   pub fn add_ty(&mut self, ty: Type) -> TypeId {
     self.types.push(ty);
     TypeId(self.types.len() as IdSize - 1)
+  }
+
+  pub fn ty_eq(&self, a_id: TypeId, b_id: TypeId) -> bool {
+    use Type::*;
+    
+    match (self.get(a_id), self.get(b_id)) {
+      (Untyped, Untyped) => false,
+      (Void, Void) => true,
+      (Bool, Bool) => true,
+      (Int, Int) => true,
+      (Float, Float) => true,
+      (Array { inner: inner_a, len: len_a }, Array { inner: inner_b, len: len_b }) => {
+        self.ty_eq(*inner_a, *inner_b) && (*len_a == 0 || len_a == len_b)
+      }
+
+      (Func { params: params_a, ret: ret_a }, Func { params: params_b, ret: ret_b }) => {
+        params_a.iter().zip(params_b.iter()).all(|(a, b)| self.ty_eq(*a, *b)) && self.ty_eq(*ret_a, *ret_b)
+      }
+
+      (Struct { name: name_a, fields: fields_a }, Struct { name: name_b, fields: fields_b }) => {
+        name_a == name_b && fields_a.iter().zip(fields_b.iter()).all(|(a, b)| a.0 == b.0 && self.ty_eq(a.1, b.1))
+      }
+
+      (UserDef, UserDef) => todo!(),
+      _ => false,
+    }
   }
 }

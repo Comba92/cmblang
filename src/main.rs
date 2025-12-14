@@ -3,7 +3,7 @@ use std::{error, fmt};
 mod lexer;
 mod parser;
 mod ast;
-mod typechecker;
+mod typecheck;
 
 pub type FrontendErrAlias = FrontendErr;
 pub type IdSize = u32;
@@ -78,8 +78,10 @@ fn main() {
   // }
 
   let mut ast = parser::parse(src).unwrap();
-  typechecker::check(&mut ast);
+  typecheck::check(&mut ast);
   
+  println!();
+
   for expr in ast.exprs {
     println!("{expr:?}");
   }

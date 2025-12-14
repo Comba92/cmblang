@@ -285,17 +285,17 @@ impl<'a> Parser<'a> {
         // TODO: might be cool if this can be a constant integer expression?
         let len_tok = self.cursor.eat();
 
-        // TODO: inferred size
-        match len_tok.kind {
-          TokenKind::Star | TokenKind::IntLit => {}
+        let len = match len_tok.kind {
+          // size will be inferred later
+          TokenKind::Star => 0,
+          TokenKind::IntLit => self.cursor.lexer.get_str(len_tok)
+            .parse()
+            .map_err(|e| self.err(format!("impossible to parse integer literal: {e}"), len_tok))?,
+
           _ => return Err(self.err("expect integer literal or '*' (inferred size) for size in array type annotation", len_tok)) 
         };
 
         self.expect(TokenKind::BraceR, "expect closing ']' in array type annotation")?;
-
-        let len = self.cursor.lexer.get_str(len_tok)
-          .parse()
-          .map_err(|e| self.err(format!("impossible to parse integer literal: {e}"), len_tok))?;
 
         self.types.add_ty(Type::Array { inner, len })
       }
@@ -514,7 +514,6 @@ impl<'a> Parser<'a> {
 }
 
 pub fn parse(src: &str) -> ParserResult<Ast> {
-  // TODO: should still return ast
   let lexer = lexer::tokenize(src)?;
   let mut parser = Parser::new(&lexer);
   
