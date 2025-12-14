@@ -57,7 +57,7 @@ impl StringInterner {
   }
 }
 
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
   Untyped,
   Void,
@@ -67,8 +67,13 @@ pub enum Type {
   Array { inner: TypeId, len: u32 },
   Func { params: Vec<TypeId>, ret: TypeId },
   Struct { name: IdentId, fields: Vec<(IdentId, TypeId)> },
-  UserDef,
-  Generic(u8),
+  UserDef(IdentId),
+  // TODO: ident might be not neccesary here
+  Generic(IdentId, u32),
+}
+
+impl Type {
+  pub fn size(&self) -> usize { todo!() }
 }
 
 pub mod ty_id {
@@ -124,13 +129,20 @@ impl TypeEnv {
     &mut self.types[id.0 as usize]
   }
 
+  // TODO: this doesn't check for duplicates
+  // TODO: we need an hashset + vec combo
+  pub fn set(&mut self, dst: TypeId, src: TypeId) {
+    let ty = self.get(src).clone();
+    self.types[dst.0 as usize] = ty;
+  }
+
   // true if was already present
   pub fn add_userdef(&mut self, name: IdentId, ty: Type) -> (TypeId, bool) {
     if let Some(id) = self.userdefs.get(&name) {
       let old = mem::replace(&mut self.types[id.0 as usize], ty);
       
       // if we had an userdef, we have just inserted the real type
-      (*id, !matches!(old, Type::UserDef))
+      (*id, !matches!(old, Type::UserDef(_)))
     } else {
       let id = self.add_ty(ty);
       self.userdefs.insert(name, id);
@@ -164,7 +176,8 @@ impl TypeEnv {
         name_a == name_b && fields_a.len() == fields_b.len() && fields_a.iter().zip(fields_b.iter()).all(|(a, b)| a.0 == b.0 && self.ty_eq(a.1, b.1))
       }
 
-      (UserDef, UserDef) => todo!(),
+      (UserDef(name_a), UserDef(name_b)) => name_a == name_b,
+      
       _ => false,
     }
   }

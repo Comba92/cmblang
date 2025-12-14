@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use crate::{CursorIter, FrontendErrAlias, IdSize, ast::{Ast, IdentId, StringInterner, Type, TypeEnv, TypeId, ty_id}, lexer::{self, KeywordKind, Lexer, Span, Token, TokenKind}}; 
 
 #[derive(Debug, Clone, Copy)]
@@ -81,10 +83,13 @@ pub enum Stmt {
   Expr(ExprId),
 }
 
+// TODO: might be better for error checking to keep these the same enum as Stmt
 #[derive(Debug)]
 pub enum StmtTopLvl {
   Decl(Decl),
-  FnDecl { name: IdentId, params: Vec<(IdentId, TypeId)>, ret: TypeId, block: StmtId },
+  // TODO: generics should be set, params a map
+  FnDecl { name: IdentId, generics: Vec<IdentId>, params: Vec<(IdentId, TypeId)>, ret: TypeId, block: StmtId },
+  // TODO: fields should be a map
   StructDecl { name: IdentId, fields: Vec<(IdentId, TypeId)> },
 }
 
@@ -329,8 +334,9 @@ impl<'a> Parser<'a> {
       TokenKind::Ident => {
         // this only adds a user defined dummy type to the environment
         // later the typechecker will update this type to the correct one
+
         let name = self.push_ident(t);
-        self.types.add_userdef(name, Type::UserDef).0
+        self.types.add_userdef(name, Type::UserDef(name)).0
       },
 
       _ => return Err(self.err("invalid type annotation", t)),
@@ -400,6 +406,17 @@ impl<'a> Parser<'a> {
     let t = self.cursor.eat();
 
     let ident = self.expect_ident("expect name after 'fn' keyword")?;
+
+    let generics = if self.cursor.eat_if(TokenKind::Less).is_some() {
+      self.collect_listing(
+        |p| p.expect_ident("expected generic identifier"),
+        TokenKind::Comma,
+        TokenKind::Great,
+        "unclosed generics listing")?
+    } else {
+      Vec::new()
+    };
+
     self.expect(TokenKind::ParenL, "expect '(' after function name")?;
 
     let params = self.collect_listing(
@@ -422,7 +439,7 @@ impl<'a> Parser<'a> {
 
     let block = self.parse_block()?;
 
-    Ok(self.push_toplvl(StmtTopLvl::FnDecl { name: ident, params, ret, block }, t.span))
+    Ok(self.push_toplvl(StmtTopLvl::FnDecl { name: ident, generics, params, ret, block }, t.span))
   }
 
   fn parse_struct(&mut self) -> ParserResult<StmtId> {
@@ -448,24 +465,6 @@ impl<'a> Parser<'a> {
     // let ty = self.push_annot(Type::Struct { name: ident, fields }, t.span);
 
     Ok(self.push_toplvl(StmtTopLvl::StructDecl { name, fields }, t.span))
-  }
-
-  fn parse_toplvl(&mut self) -> ParserResult<StmtId> {
-    let t = self.cursor.peek();
-
-    let stmt = match t.kind {
-      TokenKind::Keyword(k) => match k {
-        KeywordKind::Let => self.parse_let_or_const(false, true),
-        KeywordKind::Const => self.parse_let_or_const(true, true),
-        KeywordKind::Fn => self.parse_func(),
-        KeywordKind::Struct => self.parse_struct(),
-        _ => return Err(self.err("invalid keyword at top level", t))
-      }
-
-      _ => return Err(self.err("invalid token at top level", t)),
-    };
-    
-    Ok(stmt?)
   }
 
   fn parse_block(&mut self) -> ParserResult<StmtId> {
@@ -536,6 +535,26 @@ impl<'a> Parser<'a> {
 
     if let Some(_) = self.cursor.eat_if(TokenKind::Semicolon) {}
     Ok(stmt)
+  }
+
+  fn parse_toplvl(&mut self) -> ParserResult<StmtId> {
+    let t = self.cursor.peek();
+
+    let stmt = match t.kind {
+      TokenKind::Keyword(k) => match k {
+        KeywordKind::Let => self.parse_let_or_const(false, true),
+        KeywordKind::Const => self.parse_let_or_const(true, true),
+        KeywordKind::Fn => self.parse_func(),
+        KeywordKind::Struct => self.parse_struct(),
+        _ => return Err(self.err("invalid keyword at top level", t))
+      }
+
+      _ => return Err(self.err("invalid token at top level", t)),
+    };
+    
+    if let Some(_) = self.cursor.eat_if(TokenKind::Semicolon) {}
+
+    Ok(stmt?)
   }
 }
 

@@ -114,20 +114,36 @@ impl Typechecker {
       Expr::Call { callee, args } => {
         let callee_id = self.check_expr(ast, *callee)?;
 
-        if let Type::Func { params, ret } = self.types.get(callee_id) {
+        let callee_ty = self.types.get(callee_id);
+        if let Type::Func { params, ret } = callee_ty {
           if params.len() != args.len() {
             return Err(self.err(ast, "wrong arguments count in function call", *span))
           }
-          
-          // TODO: we sadly have to clone it here to satisfty borrow checker
-          let params = params.clone();
-          let ret = *ret;
 
-          for (pty, arg) in params.iter().zip(args.iter()) {
-            let aty = self.check_expr(ast, *arg)?;
-            if !self.types.ty_eq(*pty, aty) {
-              return Err(self.err(ast, "assignin struct member of different type", *span))
+          let mut params = params.clone();
+          let ret = *ret;
+          let mut has_generics = false;
+
+          for (param, arg) in params.iter_mut().zip(args.iter()) {
+            let param_ty = self.types.get(*param);
+
+            if let Type::Generic(_, _) = param_ty {
+              // if it is a generic, take the argument type, and set it to the parameter
+              // all parameters with this generic will be updated
+              has_generics = true;
+              let aty = self.check_expr(ast, *arg)?;
+              *param = aty;
+            } else {
+              // no generic, simply check equality
+              let aty = self.check_expr(ast, *arg)?;
+              if !self.types.ty_eq(*param, aty) {
+                return Err(self.err(ast, "call arguments of different type", *span))
+              }
             }
+          }
+
+          if has_generics {
+            // self.types.add_ty(Type::Func { params, ret });
           }
 
           ret
@@ -204,6 +220,8 @@ impl Typechecker {
         StmtTopLvl::StructDecl { name, fields } => {
           // parse fields
           // TODO: we sadly have to clone it here to satisfty borrow checker
+
+          // TODO: we should check for self referencial structs
           let (_, present) = self.types.add_userdef(*name, Type::Struct { name: *name, fields: fields.clone() });
         
           if present {
@@ -220,9 +238,37 @@ impl Typechecker {
           _ = self.check_decl(ast, decl, *span);
         }
 
-        StmtTopLvl::FnDecl { name, params, ret, block } => { 
+        StmtTopLvl::FnDecl { name, generics, params, ret, block } => { 
           // parse params, ret, and block
-          let param_types = params.iter().map(|param| param.1).collect();
+
+          let param_types = params.iter()
+            .map(|(_, ty_id)| {
+              let ty = self.types.get_mut(*ty_id);
+
+              if let Type::UserDef(ty_name) = ty {
+                // lookup generics array
+                if let Some(idx) = generics.iter().position(|g| g == ty_name) {
+                  // self.types.add_ty(Type::Generic(*name, idx as u32));
+                  *ty = Type::Generic(*name, idx as u32)
+                }
+              }
+
+              *ty_id
+            })
+            .collect();
+
+          // check for ret generic
+          let ret_ty = self.types.get_mut(*ret);
+
+          if let Type::UserDef(ty_name) = ret_ty {
+            // lookup generics array
+            if let Some(idx) = generics.iter().position(|g| g == ty_name) {
+              // self.types.add_ty(Type::Generic(*name, idx as u32));
+              // change userdef to generic
+              *ret_ty = Type::Generic(*name, idx as u32)
+            }
+          }
+
           let ty = Type::Func { params: param_types, ret: *ret };
           let ty_id = self.types.add_ty(ty);
           
