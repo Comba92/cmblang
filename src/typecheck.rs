@@ -48,11 +48,9 @@ impl Typechecker {
     None
   }
 
-  #[deprecated]
-  fn get_var_ty(&self, ast: &Ast, ident: IdentId) -> Option<&Type> {
-    self.top_scope()
-      .get(&ident)
-      .map(|id| self.types.get(*id))
+  fn get_var_ty(&self, ident: IdentId) -> Option<&Type> {
+    self.get_var(ident)
+      .map(|id| self.types.get(id))
   }
 
   fn check_expr(&mut self, ast: &Ast, id: ExprId) -> Result<TypeId, FrontendErrAlias> {
@@ -198,6 +196,7 @@ impl Typechecker {
       (Type::Untyped, Type::Untyped) => return Err(self.err(ast, "could not infer types as both are unknown", span)),
       (Type::Untyped, _) => rty_id,
       (_, Type::Untyped) => decl.annot,
+      // TODO: handle generics
       (_, _) => if self.types.ty_eq(decl.annot, rty_id) {
         // same type on both ends
         decl.annot
@@ -217,6 +216,7 @@ impl Typechecker {
       match stmt {
         StmtTopLvl::Decl(_) | StmtTopLvl::FnDecl { .. } => {}
 
+
         StmtTopLvl::StructDecl { name, fields } => {
           // parse fields
           // TODO: we sadly have to clone it here to satisfty borrow checker
@@ -231,16 +231,12 @@ impl Typechecker {
       }
     }
 
-    // now we can parse the top level declarations
+    // then, add all declared functions (as they might depend on userdefs)
     for (stmt, span) in &ast.toplvl {
       match stmt {
-        StmtTopLvl::Decl(decl) => {
-          _ = self.check_decl(ast, decl, *span);
-        }
+        StmtTopLvl::Decl(_) | StmtTopLvl::StructDecl { .. } => {}
 
-        StmtTopLvl::FnDecl { name, generics, params, ret, block } => { 
-          // parse params, ret, and block
-
+        StmtTopLvl::FnDecl { name, generics, params, ret, .. } => {
           let param_types = params.iter()
             .map(|(_, ty_id)| {
               let ty = self.types.get_mut(*ty_id);
@@ -263,7 +259,6 @@ impl Typechecker {
           if let Type::UserDef(ty_name) = ret_ty {
             // lookup generics array
             if let Some(idx) = generics.iter().position(|g| g == ty_name) {
-              // self.types.add_ty(Type::Generic(*name, idx as u32));
               // change userdef to generic
               *ret_ty = Type::Generic(*name, idx as u32)
             }
@@ -271,22 +266,40 @@ impl Typechecker {
 
           let ty = Type::Func { params: param_types, ret: *ret };
           let ty_id = self.types.add_ty(ty);
-          
+           
+
           if self.add_var(*name, ty_id) {
             self.err(ast, "already declared func", *span);
             continue;
           }
+        }
+      }
+    }
 
+    // then, parse top level variables declarations
+    for (stmt, span) in &ast.toplvl {
+      match stmt {
+        StmtTopLvl::FnDecl { .. } | StmtTopLvl::StructDecl { .. } => {}
+        
+        StmtTopLvl::Decl(decl) => {
+          _ = self.check_decl(ast, decl, *span);
+        }
+      }
+    }
+
+    // finally, parse function bodies
+    for (stmt, _) in &ast.toplvl {
+      match stmt {
+        StmtTopLvl::Decl(_) | StmtTopLvl::StructDecl { .. } => {}
+
+        StmtTopLvl::FnDecl { params, block, .. } => { 
           self.push_scope();
           for param in params {
             self.add_var(param.0, param.1);
           }
-          
           _ = self.check_stmt(ast, *block);
           self.pop_scope();
         }
-
-        StmtTopLvl::StructDecl { .. } => {}
       }
     }
   }
