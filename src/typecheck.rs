@@ -1,5 +1,7 @@
 use std::{collections::HashMap, mem};
 use crate::{FrontendErr, FrontendErrAlias, ast::{Ast, IdentId, Type, TypeEnv, TypeId, ty_id}, lexer::Span, parser::{self, Expr, ExprId, ExprLiteral, Stmt, StmtId, StmtTopLvl}};
+use std::{collections::HashMap, mem};
+use crate::{FrontendErr, FrontendErrAlias, ast::{Ast, IdentId, Type, TypeEnv, TypeId, ty_id}, lexer::Span, parser::{self, Expr, ExprId, ExprLiteral, Stmt, StmtId, StmtTopLvl}};
 
 type Scope = HashMap<IdentId, TypeId>;
 
@@ -31,6 +33,7 @@ impl Typechecker {
   fn err<S: Into<String>>(&self, ast: &Ast, msg: S, span: Span) -> FrontendErrAlias {
     let err = FrontendErr::new(&ast.lexer, msg, span);
     eprintln!("[TYPE ERR] {err}");
+    eprintln!("[TYPE ERR] {err}");
     err
   }
 
@@ -43,8 +46,10 @@ impl Typechecker {
   }
 
   fn get_var_ty(&self, ast: &Ast, ident: IdentId) -> Option<&Type> {
+  fn get_var_ty(&self, ast: &Ast, ident: IdentId) -> Option<&Type> {
     self.top_scope()
       .get(&ident)
+      .map(|id| self.types.get(*id))
       .map(|id| self.types.get(*id))
   }
 
@@ -55,6 +60,21 @@ impl Typechecker {
         ExprLiteral::Bool(_) => ty_id::BOOL,
         ExprLiteral::Int(_) => ty_id::INT,
         ExprLiteral::Float(_) => ty_id::FLOAT,
+        ExprLiteral::Array(exprs) => {
+          if exprs.len() == 0 { return Ok(ty_id::UNTYPED) }
+
+          let prev = self.check_expr(ast, exprs[0])?;
+
+          for i in 1..exprs.len() {
+            let curr = self.check_expr(ast, exprs[i])?;
+            
+            if !self.types.ty_eq(prev, curr) {
+              return Err(self.err(ast, "array values must be of the same type", *span));
+            }
+          }
+
+          self.types.add_ty(Type::Array { inner: prev, len: exprs.len() as u32 })
+        }
         ExprLiteral::Array(exprs) => {
           if exprs.len() == 0 { return Ok(ty_id::UNTYPED) }
 
@@ -89,9 +109,16 @@ impl Typechecker {
     let (s, span) = &ast.stmts[id.0 as usize];
     match s {
       Stmt::Decl(decl) => self.check_decl(ast, decl, *span),
+      Stmt::Decl(decl) => self.check_decl(ast, decl, *span),
       Stmt::Assign { lhs, rhs } => {
         let lty = self.check_expr(ast, *lhs)?;
         let rty = self.check_expr(ast, *rhs)?;
+        
+        if !self.types.ty_eq(lty, rty)  {
+          return Err(self.err(ast, "assigning value of different type", *span));
+        }
+
+        Ok(())
         
         if !self.types.ty_eq(lty, rty)  {
           return Err(self.err(ast, "assigning value of different type", *span));
@@ -110,6 +137,7 @@ impl Typechecker {
   fn check_block(&mut self, ast: &Ast, stmts: &[StmtId]) -> Result<(), FrontendErrAlias> {
     for s in stmts {
       _ = self.check_stmt(ast, *s);
+      _ = self.check_stmt(ast, *s);
     }
 
     Ok(())
@@ -125,6 +153,7 @@ impl Typechecker {
       (Type::Untyped, Type::Untyped) => return Err(self.err(ast, "could not infer types as both are unknown", span)),
       (Type::Untyped, _) => rty_id,
       (_, Type::Untyped) => decl.annot,
+      (_, _) => if self.types.ty_eq(decl.annot, rty_id) {
       (_, _) => if self.types.ty_eq(decl.annot, rty_id) {
         // same type on both ends
         decl.annot
@@ -148,8 +177,11 @@ impl Typechecker {
           // parse fields
           // TODO: we're cloning here, not really sure about that
           let (_, present) = self.types.add_userdef(*name, Type::Struct { name: *name, fields: fields.clone() });
+          // TODO: we're cloning here, not really sure about that
+          let (_, present) = self.types.add_userdef(*name, Type::Struct { name: *name, fields: fields.clone() });
         
           if present {
+            self.err(ast, "already declared struct", *span);
             self.err(ast, "already declared struct", *span);
           }
         }
@@ -161,6 +193,7 @@ impl Typechecker {
       match stmt {
         StmtTopLvl::Decl(decl) => {
           _ = self.check_decl(ast, decl, *span);
+          _ = self.check_decl(ast, decl, *span);
         }
 
         StmtTopLvl::FnDecl { name, params, ret, block } => { 
@@ -168,8 +201,10 @@ impl Typechecker {
           let param_types = params.iter().map(|param| param.1).collect();
           let ty = Type::Func { params: param_types, ret: *ret };
           let ty_id = self.types.add_ty(ty);
+          let ty_id = self.types.add_ty(ty);
           
           if self.add_var(*name, ty_id) {
+            self.err(ast, "already declared func", *span);
             self.err(ast, "already declared func", *span);
             continue;
           }
@@ -179,6 +214,7 @@ impl Typechecker {
             self.add_var(param.0, param.1);
           }
           
+          _ = self.check_stmt(ast, *block);
           _ = self.check_stmt(ast, *block);
           self.pop_scope();
         }
