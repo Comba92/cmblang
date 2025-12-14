@@ -1,3 +1,4 @@
+use core::fmt;
 use std::{collections::HashMap, iter::zip, mem};
 use crate::{FrontendErr, FrontendErrAlias, ast::{Ast, IdentId, Type, TypeEnv, TypeId, ty_id}, lexer::Span, parser::{self, Expr, ExprId, ExprLiteral, Stmt, StmtId, StmtTopLvl}};
 
@@ -7,9 +8,13 @@ struct Typechecker {
   tbl: Vec<Scope>,
   types: TypeEnv,
 }
+impl fmt::Debug for Typechecker {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("Typechecker").field("tbl", &self.tbl).finish()
+  }
+}
 
 impl Typechecker {
-
   fn top_scope(&self) -> &Scope {
     let len = self.tbl.len()-1;
     &self.tbl[len]
@@ -226,9 +231,13 @@ impl Typechecker {
 
     let res = match (decl_ty, rty) {
       (Type::Untyped, Type::Untyped) => return Err(self.err(ast, "could not infer types as both are unknown", span)),
+      // TODO: attention, handle generics to the right
+      
+      (Type::Untyped, Type::FuncGeneric { .. }) => return Err(self.err(ast, "generic function requires annotations", span)),
       (Type::Untyped, _) => rty_id,
+
       (_, Type::Untyped) => decl.annot,
-      // TODO: handle generics
+
       (_, _) => if self.types.ty_eq(decl.annot, rty_id) {
         // same type on both ends
         decl.annot
@@ -268,6 +277,8 @@ impl Typechecker {
         StmtTopLvl::Decl(_) | StmtTopLvl::StructDecl { .. } => {}
 
         StmtTopLvl::FnDecl { name, generics, params, ret, .. } => {
+          // TODO: this doesnt work, will edit generics of other functions
+          
           let param_types = if generics.is_empty() {
             params.iter().map(|p| p.1).collect()
           } else {

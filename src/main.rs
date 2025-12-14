@@ -70,7 +70,7 @@ trait CursorIter<Inner> {
 fn main() {
   println!("Hello World!");
 
-  let src = include_str!("../test.cmb");
+  let src = include_str!("../test2.cmb");
   // let lexer = lexer::tokenize(src).unwrap();
 
   // for tok in lexer.tokens.iter() {
@@ -82,23 +82,23 @@ fn main() {
   
   println!();
 
-  // for expr in ast.exprs {
-  //   println!("{expr:?}");
-  // }
-  // println!();
+  for expr in ast.exprs {
+    println!("{expr:?}");
+  }
+  println!();
 
-  // for stmt in ast.toplvl {
-  //   println!("{stmt:?}");
-  // }
-  // println!();
+  for stmt in ast.toplvl {
+    println!("{stmt:?}");
+  }
+  println!();
 
-  // for stmt in ast.stmts {
-  //   println!("{stmt:?}");
-  // }
-  // println!();
+  for stmt in ast.stmts {
+    println!("{stmt:?}");
+  }
+  println!();
 
-  for ty in ast.types.types_heap {
-    println!("{ty:?}");
+  for (i, ty) in ast.types.types_heap.iter().enumerate() {
+    println!("{i} -> {ty:?}");
   }
   println!();
 
