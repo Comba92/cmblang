@@ -80,6 +80,8 @@ fn main() {
   let mut ast = parser::parse(src).unwrap();
   typechecker::check(&mut ast);
   
+  println!();
+
   for expr in ast.exprs {
     println!("{expr:?}");
   }
