@@ -13,6 +13,8 @@ pub enum ExprLiteral {
   Float(TokenId),
   Bool(TokenId),
   Array(Vec<ExprId>),
+  // TODO: rn members should be provided in order
+  Struct(IdentId, Vec<ExprId>)
 }
 
 #[derive(Debug)]
@@ -193,7 +195,22 @@ impl<'a> Parser<'a> {
 
       Ident => {
         let ident = self.push_ident(t);
-        self.push_expr(Expr::Variable(ident), t.span)
+
+        if self.cursor.eat_if(TokenKind::CurlyL).is_some() {
+          // struct literal
+
+          // TODO: this should be more complex than this
+          // rn we only expect the members in order
+          let members = self.collect_listing(
+            |p| p.parse_expr(0),
+            TokenKind::Comma,
+            TokenKind::CurlyR,
+          "unclosed struct literal")?;
+          
+          self.push_expr(Expr::Literal(ExprLiteral::Struct(ident, members)), t.span)
+        } else {
+          self.push_expr(Expr::Variable(ident), t.span)
+        }
       }
 
       // prefix op
@@ -219,6 +236,8 @@ impl<'a> Parser<'a> {
         self.push_expr(Expr::Literal(ExprLiteral::Array(exprs)), t.span)
       }
 
+      // CurlyL => todo!("parse anonymous struct literal"),
+
       _ => return Result::Err(self.err("invalid lhs expression", t)),
     };
 
@@ -232,9 +251,17 @@ impl<'a> Parser<'a> {
         self.cursor.advance();
 
         lhs = match op.kind {
-          TokenKind::ParenL => todo!("function call"),
-          TokenKind::BraceL => todo!("array indexing"),
+          TokenKind::ParenL => {
+            let args = self.collect_listing(
+              |p| p.parse_expr(0),
+              TokenKind::Comma, 
+              TokenKind::ParenR,
+              "unclosed function call")?;
+            
+            self.push_expr(Expr::Call { callee: lhs, args }, op.span)
+          },
           TokenKind::Dot => todo!("member access"),
+          TokenKind::BraceL => todo!("array indexing"),
           _ => return Result::Err(self.err("invalid postfix expression", t)),
         };
 
@@ -253,7 +280,6 @@ impl<'a> Parser<'a> {
   }
 
   fn parse_annot(&mut self) -> ParserResult<TypeId> {
-    let id = self.cursor.curr_id();
     let t = self.cursor.eat();
 
     let ty = match t.kind {

@@ -104,8 +104,12 @@ impl Default for TypeEnv {
 }
 
 impl TypeEnv {
+  pub fn lookup_id(&self, id: IdentId) -> TypeId {
+    self.userdefs[&id]
+  }
+
   pub fn lookup(&self, id: IdentId) -> &Type {
-    &self.types[self.userdefs[&id].0 as usize]
+    &self.types[self.lookup_id(id).0 as usize]
   }
 
   pub fn lookup_mut(&mut self, id: IdentId) -> &mut Type {
@@ -153,11 +157,11 @@ impl TypeEnv {
       }
 
       (Func { params: params_a, ret: ret_a }, Func { params: params_b, ret: ret_b }) => {
-        params_a.iter().zip(params_b.iter()).all(|(a, b)| self.ty_eq(*a, *b)) && self.ty_eq(*ret_a, *ret_b)
+        params_a.len() == params_b.len() && params_a.iter().zip(params_b.iter()).all(|(a, b)| self.ty_eq(*a, *b)) && self.ty_eq(*ret_a, *ret_b)
       }
 
       (Struct { name: name_a, fields: fields_a }, Struct { name: name_b, fields: fields_b }) => {
-        name_a == name_b && fields_a.iter().zip(fields_b.iter()).all(|(a, b)| a.0 == b.0 && self.ty_eq(a.1, b.1))
+        name_a == name_b && fields_a.len() == fields_b.len() && fields_a.iter().zip(fields_b.iter()).all(|(a, b)| a.0 == b.0 && self.ty_eq(a.1, b.1))
       }
 
       (UserDef, UserDef) => todo!(),

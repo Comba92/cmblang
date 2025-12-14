@@ -39,9 +39,16 @@ impl Typechecker {
   }
 
   fn get_var(&self, ident: IdentId) -> Option<TypeId> {
-    self.top_scope().get(&ident).copied()
+    // we start from the deepest scope, and check upwards
+    for scope in self.tbl.iter().rev() {
+      let entry = scope.get(&ident).copied();
+      if entry.is_some() { return entry }
+    }
+
+    None
   }
 
+  #[deprecated]
   fn get_var_ty(&self, ast: &Ast, ident: IdentId) -> Option<&Type> {
     self.top_scope()
       .get(&ident)
@@ -56,6 +63,7 @@ impl Typechecker {
         ExprLiteral::Int(_) => ty_id::INT,
         ExprLiteral::Float(_) => ty_id::FLOAT,
         ExprLiteral::Array(exprs) => {
+          // uninit array
           if exprs.len() == 0 { return Ok(ty_id::UNTYPED) }
 
           let prev = self.check_expr(ast, exprs[0])?;
@@ -70,6 +78,31 @@ impl Typechecker {
 
           self.types.add_ty(Type::Array { inner: prev, len: exprs.len() as u32 })
         }
+
+        ExprLiteral::Struct(name, exprs) => {
+          // uninit struct
+          if exprs.len() == 0 { return Ok(ty_id::UNTYPED) }
+
+          if let Type::Struct { fields, .. } = self.types.lookup(*name) {
+            if exprs.len() != fields.len() {
+              return Err(self.err(ast, "wrong members count in struct literal", *span))
+            }
+
+            // TODO: we sadly have to clone it here to satisfty borrow checker
+            let fields = fields.iter().map(|f| f.1).collect::<Vec<_>>();
+            
+            for (decl_ty, rhs) in fields.iter().zip(exprs.iter()) {
+              let rty = self.check_expr(ast, *rhs)?;
+              if !self.types.ty_eq(*decl_ty, rty) {
+                return Err(self.err(ast, "assignin struct member of different type", *span))
+              }
+            }
+
+            self.types.lookup_id(*name)
+          } else {
+            return Err(self.err(ast, "undefined struct name", *span))
+          }
+        }
       }
 
       Expr::Variable(ident) => {
@@ -78,7 +111,30 @@ impl Typechecker {
       },
       Expr::Unary { op, rhs } => todo!(),
       Expr::Binary { op, lhs, rhs } => todo!(),
-      Expr::Call { callee, args } => todo!(),
+      Expr::Call { callee, args } => {
+        let callee_id = self.check_expr(ast, *callee)?;
+
+        if let Type::Func { params, ret } = self.types.get(callee_id) {
+          if params.len() != args.len() {
+            return Err(self.err(ast, "wrong arguments count in function call", *span))
+          }
+          
+          // TODO: we sadly have to clone it here to satisfty borrow checker
+          let params = params.clone();
+          let ret = *ret;
+
+          for (pty, arg) in params.iter().zip(args.iter()) {
+            let aty = self.check_expr(ast, *arg)?;
+            if !self.types.ty_eq(*pty, aty) {
+              return Err(self.err(ast, "assignin struct member of different type", *span))
+            }
+          }
+
+          ret
+        } else {
+          return Err(self.err(ast, "can't call on non-function type", *span))
+        }
+      },
       Expr::Member { lhs, field } => todo!(),
       Expr::Index { lhs, idx } => todo!(),
     };
@@ -147,7 +203,7 @@ impl Typechecker {
 
         StmtTopLvl::StructDecl { name, fields } => {
           // parse fields
-          // TODO: we're cloning here, not really sure about that
+          // TODO: we sadly have to clone it here to satisfty borrow checker
           let (_, present) = self.types.add_userdef(*name, Type::Struct { name: *name, fields: fields.clone() });
         
           if present {
@@ -198,4 +254,7 @@ pub fn check(ast: &mut Ast) {
   typechecker.push_scope();
 
   typechecker.check_toplvl(ast);
+
+  // TODO: this gives types back to ast, not sure (we probably will need ast types later)
+  ast.types = mem::take(&mut typechecker.types);
 }
