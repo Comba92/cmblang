@@ -82,22 +82,22 @@ fn main() {
   
   println!();
 
-  for expr in ast.exprs {
-    println!("{expr:?}");
-  }
-  println!();
+  // for expr in ast.exprs {
+  //   println!("{expr:?}");
+  // }
+  // println!();
 
-  for stmt in ast.toplvl {
-    println!("{stmt:?}");
-  }
-  println!();
+  // for stmt in ast.toplvl {
+  //   println!("{stmt:?}");
+  // }
+  // println!();
 
-  for stmt in ast.stmts {
-    println!("{stmt:?}");
-  }
-  println!();
+  // for stmt in ast.stmts {
+  //   println!("{stmt:?}");
+  // }
+  // println!();
 
-  for ty in ast.types.types {
+  for ty in ast.types.types_heap {
     println!("{ty:?}");
   }
   println!();

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, mem};
+use std::{collections::HashMap, iter::zip, mem};
 use crate::{FrontendErr, FrontendErrAlias, ast::{Ast, IdentId, Type, TypeEnv, TypeId, ty_id}, lexer::Span, parser::{self, Expr, ExprId, ExprLiteral, Stmt, StmtId, StmtTopLvl}};
 
 type Scope = HashMap<IdentId, TypeId>;
@@ -89,9 +89,9 @@ impl Typechecker {
             // TODO: we sadly have to clone it here to satisfty borrow checker
             let fields = fields.iter().map(|f| f.1).collect::<Vec<_>>();
             
-            for (decl_ty, rhs) in fields.iter().zip(exprs.iter()) {
+            for (decl_ty, rhs) in zip(fields, exprs) {
               let rty = self.check_expr(ast, *rhs)?;
-              if !self.types.ty_eq(*decl_ty, rty) {
+              if !self.types.ty_eq(decl_ty, rty) {
                 return Err(self.err(ast, "assignin struct member of different type", *span))
               }
             }
@@ -107,48 +107,80 @@ impl Typechecker {
         self.get_var(*ident)
           .ok_or_else(|| self.err(ast, "undeclared variable", *span))?
       },
+
       Expr::Unary { op, rhs } => todo!(),
       Expr::Binary { op, lhs, rhs } => todo!(),
+
       Expr::Call { callee, args } => {
         let callee_id = self.check_expr(ast, *callee)?;
-
         let callee_ty = self.types.get(callee_id);
-        if let Type::Func { params, ret } = callee_ty {
+        if let Type::FuncGeneric { params, ret } = callee_ty {
           if params.len() != args.len() {
             return Err(self.err(ast, "wrong arguments count in function call", *span))
           }
 
-          let mut params = params.clone();
+          // TODO: can we do something about cloning here?
+          let params = params.clone();
           let ret = *ret;
-          let mut has_generics = false;
 
-          for (param, arg) in params.iter_mut().zip(args.iter()) {
-            let param_ty = self.types.get(*param);
+          let mut generics_map = HashMap::new();
 
-            if let Type::Generic(_, _) = param_ty {
-              // if it is a generic, take the argument type, and set it to the parameter
-              // all parameters with this generic will be updated
-              has_generics = true;
-              let aty = self.check_expr(ast, *arg)?;
-              *param = aty;
+          for (param_ty_id, arg) in zip(params, args) {
+            let arg_ty_id = self.check_expr(ast, *arg)?;
+
+            let param_ty = self.types.get(param_ty_id);
+
+            if let Type::Generic(_, id) = param_ty {
+              if let Some(gen_ty_id) = generics_map.get(id) {
+                // already found generic and assigned it; check for equality
+                if !self.types.ty_eq(*gen_ty_id, arg_ty_id) {
+                  return Err(self.err(ast, "call arguments of different type", *span))
+                }
+              } else {
+                // we just found the generic, add to map
+                generics_map.insert(*id, arg_ty_id);
+              }
             } else {
               // no generic, simply check equality
-              let aty = self.check_expr(ast, *arg)?;
-              if !self.types.ty_eq(*param, aty) {
+              if !self.types.ty_eq(param_ty_id, arg_ty_id) {
                 return Err(self.err(ast, "call arguments of different type", *span))
               }
             }
           }
 
-          if has_generics {
-            // self.types.add_ty(Type::Func { params, ret });
+          // check ret type
+          if let Type::Generic(_, id) = self.types.get(ret) {
+            if let Some(gen_ty_id) = generics_map.get(id) {
+              // already found generic and assigned it; we have a type for return
+              *gen_ty_id
+            } else {
+              return Err(self.err(ast, "return type couldn't be inferred from generic", *span))
+            }
+          } else {
+            // not a generic
+            ret
+          }
+        } else if let Type::Func { params, ret } = callee_ty {
+          if params.len() != args.len() {
+            return Err(self.err(ast, "wrong arguments count in function call", *span))
+          }
+
+          let params = params.clone();
+          let ret = *ret;
+
+          for (param, arg) in zip(params, args) {
+            let aty = self.check_expr(ast, *arg)?;
+            if !self.types.ty_eq(param, aty) {
+              return Err(self.err(ast, "call arguments of different type", *span))
+            }
           }
 
           ret
         } else {
-          return Err(self.err(ast, "can't call on non-function type", *span))
+          return Err(self.err(ast, "can't call on non function type", *span))
         }
       },
+      
       Expr::Member { lhs, field } => todo!(),
       Expr::Index { lhs, idx } => todo!(),
     };
@@ -216,7 +248,6 @@ impl Typechecker {
       match stmt {
         StmtTopLvl::Decl(_) | StmtTopLvl::FnDecl { .. } => {}
 
-
         StmtTopLvl::StructDecl { name, fields } => {
           // parse fields
           // TODO: we sadly have to clone it here to satisfty borrow checker
@@ -237,36 +268,43 @@ impl Typechecker {
         StmtTopLvl::Decl(_) | StmtTopLvl::StructDecl { .. } => {}
 
         StmtTopLvl::FnDecl { name, generics, params, ret, .. } => {
-          let param_types = params.iter()
+          let param_types = if generics.is_empty() {
+            params.iter().map(|p| p.1).collect()
+          } else {
+            // we have generics
+            params.iter()
             .map(|(_, ty_id)| {
               let ty = self.types.get_mut(*ty_id);
 
               if let Type::UserDef(ty_name) = ty {
                 // lookup generics array
                 if let Some(idx) = generics.iter().position(|g| g == ty_name) {
-                  // self.types.add_ty(Type::Generic(*name, idx as u32));
                   *ty = Type::Generic(*name, idx as u32)
                 }
               }
 
               *ty_id
             })
-            .collect();
+            .collect()
+          };
 
-          // check for ret generic
-          let ret_ty = self.types.get_mut(*ret);
+          let ty = if generics.is_empty() {
+            Type::Func { params: param_types, ret: *ret }
+          } else {
+            let ret_ty = self.types.get_mut(*ret);
 
-          if let Type::UserDef(ty_name) = ret_ty {
-            // lookup generics array
-            if let Some(idx) = generics.iter().position(|g| g == ty_name) {
-              // change userdef to generic
-              *ret_ty = Type::Generic(*name, idx as u32)
+            if let Type::UserDef(ty_name) = ret_ty {
+              // lookup generics array
+              if let Some(idx) = generics.iter().position(|g| g == ty_name) {
+                // change userdef to generic
+                *ret_ty = Type::Generic(*name, idx as u32)
+              }
             }
-          }
 
-          let ty = Type::Func { params: param_types, ret: *ret };
+            Type::FuncGeneric { params: param_types, ret: *ret }
+          };
+
           let ty_id = self.types.add_ty(ty);
-           
 
           if self.add_var(*name, ty_id) {
             self.err(ast, "already declared func", *span);
