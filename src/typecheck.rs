@@ -1,9 +1,8 @@
-use std::{collections::HashMap, iter::zip};
-use crate::{FrontendErrAlias, IdSize, ast::{Ast, IdentId}, lexer::Span, parser::{ExprId, StmtTopLvl, TyAnnot, TyAnnotId}};
+use std::{collections::{HashMap, HashSet}, iter::zip};
+use crate::{FrontendErrAlias, IdSize, ast::{Ast, IdentId}, lexer::Span, parser::{Expr, ExprId, ExprLiteral, Stmt, StmtId, StmtTopLvl, TyAnnot, TyAnnotId}};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
-  Untyped,
   Void,
   Bool,
   Int,
@@ -12,8 +11,8 @@ pub enum Type {
   
   Func { params: Vec<TypeId>, ret: TypeId },
   Struct { name: IdentId, fields: Vec<(IdentId, TypeId)> },
-
-  Generic {func_name: IdentId, id: u16 }
+  
+  Generic(IdentId),
 }
 
 impl Type {
@@ -23,11 +22,10 @@ impl Type {
 pub mod ty_id {
   use super::TypeId;
 
-  pub const UNTYPED:  TypeId = TypeId(0);
-  pub const VOID:     TypeId = TypeId(1);
-  pub const BOOL:     TypeId = TypeId(2);
-  pub const INT:      TypeId = TypeId(3);
-  pub const FLOAT:    TypeId = TypeId(4);
+  pub const VOID:     TypeId = TypeId(0);
+  pub const BOOL:     TypeId = TypeId(1);
+  pub const INT:      TypeId = TypeId(2);
+  pub const FLOAT:    TypeId = TypeId(3);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -42,7 +40,6 @@ impl Default for TypeEnv {
     Self {
       user_ident_to_id: HashMap::new(),
       types_pool: vec![
-        Type::Untyped,
         Type::Void,
         Type::Bool,
         Type::Int,
@@ -61,7 +58,7 @@ impl TypeEnv {
     &self.types_pool[self.lookup_id(id).0 as usize]
   }
 
-  pub fn lookup_mut(&mut self, id: IdentId) -> &mut Type {
+  pub fn lookup_ty_mut(&mut self, id: IdentId) -> &mut Type {
     &mut self.types_pool[self.user_ident_to_id[&id].0 as usize]
   }
 
@@ -75,29 +72,16 @@ impl TypeEnv {
 
   // TODO: this doesn't check for duplicates
   // TODO: we need an hashset + vec combo
-  pub fn set(&mut self, dst: TypeId, src: TypeId) {
-    let ty = self.get(src).clone();
-    self.types_pool[dst.0 as usize] = ty;
-  }
-
-  // true if was already present
-  // pub fn add_userdef(&mut self, name: IdentId, ty: Type) -> (TypeId, bool) {
-  //   if let Some(id) = self.user_ident_to_id.get(&name) {
-  //     let old = mem::replace(&mut self.types_pool[id.0 as usize], ty);
-      
-  //     // if we had an userdef, we have just inserted the real type
-  //     (*id, !matches!(old, Type::UserDef(_)))
-  //   } else {
-  //     let id = self.add_ty(ty);
-  //     self.user_ident_to_id.insert(name, id);
-  //     (id, false)
-  //   }
+  // pub fn set(&mut self, dst: TypeId, src: TypeId) {
+  //   let ty = self.get(src).clone();
+  //   self.types_pool[dst.0 as usize] = ty;
   // }
 
+  // returns None if was already present
   pub fn add_userdef(&mut self, name: IdentId, ty: Type) -> Option<TypeId> {
     let id = self.add_ty(ty);
     match self.user_ident_to_id.insert(name, id) {
-      Some(_) => None,
+      Some(old) => None,
       None => Some(id)
     }
   }
@@ -107,118 +91,70 @@ impl TypeEnv {
     TypeId(self.types_pool.len() as IdSize - 1)
   }
 
-  pub fn ty_eq(&self, a_id: TypeId, b_id: TypeId) -> bool {
-    use Type::*;
-    
-    match (self.get(a_id), self.get(b_id)) {
-      (Untyped, Untyped) => false,
-      (Void, Void) => true,
-      (Bool, Bool) => true,
-      (Int, Int) => true,
-      (Float, Float) => true,
-      // (Generic(_, a), Generic(_, b)) => a == b,
+  pub fn ty_eq(&self, a: TypeId, b: TypeId) -> bool {
+    match (self.get(a), self.get(b)) {
+      (Type::Void, Type::Void) => true,
+      (Type::Bool, Type::Bool) => true,
+      (Type::Int, Type::Int) => true,
+      (Type::Float, Type::Float) => true,
+      (Type::Generic(ident_a), Type::Generic(ident_b)) => ident_a == ident_b,
 
-      (Array { inner: inner_a, len: len_a }, Array { inner: inner_b, len: len_b }) => {
-        self.ty_eq(*inner_a, *inner_b) && (*len_a == 0 || len_a == len_b)
+      (Type::Array { inner: ta, len: len_a }, Type::Array { inner: tb, len: len_b }) => {
+        len_a == len_b && self.ty_eq(*ta, *tb)
+      },
+
+      (Type::Func { params: pa, ret: ra }, Type::Func { params: pb, ret: rb }) => {
+        ra == rb && pa.len() == pb.len() && zip(pa, pb).all(|(ta, tb)| self.ty_eq(*ta, *tb))
       }
 
-      // (Func { params: params_a, ret: ret_a }, Func { params: params_b, ret: ret_b }) => {
-      //   params_a.len() == params_b.len() && self.ty_eq(*ret_a, *ret_b) && zip(params_a, params_b).all(|(a, b)| self.ty_eq(*a, *b))
-      // }
+      (Type::Struct { name: na, fields: fa }, Type::Struct { name: nb, fields: fb }) => todo!(),
 
-      // generic is always b
-      // (Func { params: params_a, ret: ret_a }, FuncGeneric { params: params_b, ret: ret_b }) |
-      // (FuncGeneric { params: params_b, ret: ret_b }, Func { params: params_a, ret: ret_a }) => {
-      //   // TODO: this doesnt work
-      //   if params_a.len() != params_b.len() { return false; }
-
-      //   let mut generics_map = HashMap::new();
-
-      //   for (a, b) in zip(params_a, params_b) {
-      //     let param_ty = self.get(*b);
-
-      //     if let Type::Generic(_, id) = param_ty {
-      //       if let Some(gen_ty_id) = generics_map.get(id) {
-      //         // already found generic and assigned it; check for equality
-      //         if !self.ty_eq(*a, *gen_ty_id) {
-      //           return false
-      //         }
-      //       } else {
-      //         // we just found the generic, add to map
-      //         generics_map.insert(*id, *a);
-      //       }
-      //     } else {
-      //       // no generic, simply check equality
-      //       if !self.ty_eq(*a, *b) {
-      //         return false
-      //       }
-      //     }
-      //   }
-
-      //   // check ret type
-      //   if let Type::Generic(_, id) = self.get(*ret_b) {
-      //     if let Some(gen_ty_id) = generics_map.get(id) {
-      //       // already found generic and assigned it; we have a type for return
-      //       self.ty_eq(*ret_a, *gen_ty_id)
-      //     } else {
-      //       // TODO: no idea when this case should happen
-      //       false
-      //     }
-      //   } else {
-      //     // not a generic
-      //     self.ty_eq(*ret_a, *ret_b)
-      //   }
-      // }
-
-      (Struct { name: name_a, fields: fields_a }, Struct { name: name_b, fields: fields_b }) => {
-        name_a == name_b && fields_a.len() == fields_b.len() && zip(fields_a, fields_b).all(|(a, b)| a.0 == b.0 && self.ty_eq(a.1, b.1))
-      }
-
-      // (UserDef(name_a), UserDef(name_b)) => name_a == name_b,
-      
       _ => false,
     }
   }
 
-  // pub fn resolve_type_generics(&self, virt_id: TypeId, real_id: TypeId, mapped: &mut HashMap<u16, TypeId>) -> TypeId {
-  //   let virt_ty = self.get(virt_id);
+  pub fn generic_eq(&self, gen_id: TypeId, conc_id: TypeId, mapping: &mut HashMap<IdentId, TypeId>) -> Option<TypeId>  {
+    let gen_ty = self.get(gen_id);
 
-  //   let res = match virt_ty {
-  //     Type::Untyped => virt_id,
-  //     Type::Void => virt_id,
-  //     Type::Bool => virt_id,
-  //     Type::Int => virt_id,
-  //     Type::Float => virt_id,
-  //     Type::Array { inner, .. } => {
-  //       self.resolve_type_generics(*inner, real_id, mapped)
-  //     },
-  //     // we know this won't have any generic
-  //     Type::Func { .. } => virt_id,
-  //     Type::FuncGeneric { .. } => todo!("generic function generics"),
-  //     Type::Struct { .. } => todo!("struct generics"),
-  //     Type::UserDef(_) => unreachable!("user defs should not be present at this point"),
-  //     Type::Generic { order, .. } => {
-  //       if let Some(gen_ty_id) = mapped.get(order) {
-  //         // // already found generic and assigned it; check for equality
-  //         // if self.ty_eq(*gen_ty_id, real_id) {
-  //         //   // types are equal, we're good
-  //         //   *gen_ty_id
-  //         // } else {
-  //         //   // types are different, instantiation error
-  //         //   return Err("call arguments of different type")
-  //         // }
-  //         *gen_ty_id
-  //       } else {
-  //         // we just found the generic, add to map
-  //         mapped.insert(*order, real_id);
-  //         real_id
-  //       }
-  //     },
-  //   };
+    let id = match gen_ty {
+      Type::Generic(ident) => match mapping.get(ident) {
+        // already mapped, check for equality
+        Some(ty) => {
+          if self.ty_eq(*ty, conc_id) {
+            conc_id
+          } else { return None }
+        }
 
-  //   // Ok(res)
-  //   res
-  // }
+        // not mapped yet, insert
+        None => {
+          mapping.insert(*ident, conc_id);
+          conc_id
+        }
+      }
+      
+      // not generic
+      Type::Void => gen_id,
+      Type::Bool => gen_id,
+      Type::Int => gen_id,
+      Type::Float => gen_id,
+
+      Type::Array { inner, .. } => {
+        self.generic_eq(*inner, conc_id, mapping)?
+      },
+      Type::Func { params, ret } => {
+        for param in params {
+          self.generic_eq(*param, conc_id, mapping)?;
+        }
+
+        self.generic_eq(*ret, conc_id, mapping)?;
+        gen_id
+      },
+
+      Type::Struct { name, fields } => todo!(),
+    };
+
+    Some(id)
+  }
 }
 
 #[derive(Default)]
@@ -250,18 +186,11 @@ impl Bindings {
       };
     }
   }
-
-  pub fn scope<F: Fn(&mut Self)>(&mut self, f: F) {
-    let sp = self.stack.len();
-    f(self);
-    self.unwind(sp);
-  }
 }
 
 #[derive(Default)]
 struct Typechecker {
   binds: Bindings,
-  types: TypeEnv,
 }
 
 impl Typechecker {
@@ -271,86 +200,182 @@ impl Typechecker {
     err
   }
 
-  pub fn annot_to_ty(&mut self, ast: &Ast, id: TyAnnotId) -> TypeId {
+  pub fn scope<F: FnMut(&mut Self)>(&mut self, mut f: F) {
+    let sp = self.binds.stack.len();
+    f(self);
+    self.binds.unwind(sp);
+  }
+
+  pub fn annot_to_ty(&mut self, ast: &Ast, types: &mut TypeEnv, id: TyAnnotId) -> TypeId {
     let (annot, span) = &ast.annots[id.0 as usize];
-    match annot {
-      TyAnnot::Untyped => ty_id::UNTYPED,
+    let id = match annot {
+      // TODO: temporary hack
+      TyAnnot::Untyped => ty_id::VOID,
       TyAnnot::Bool => ty_id::BOOL,
       TyAnnot::Int => ty_id::INT,
       TyAnnot::Float => ty_id::FLOAT,
       TyAnnot::Void => ty_id::VOID,
       
-      TyAnnot::Array { inner, len } => {
-        let inner_id = self.annot_to_ty(ast, *inner);
+      TyAnnot::Generic(ident) => types.add_ty(Type::Generic(*ident)),
+
+      TyAnnot::Array { inner, .. } => {
+        let inner_id = self.annot_to_ty(ast, types, *inner);
         // TODO: array len
         let ty = Type::Array { inner: inner_id, len: 0 };
-        self.types.add_ty(ty)
+        types.add_ty(ty)
       },
 
       TyAnnot::Func { params, ret } => {
         let params_ids = params.iter()
-          .map(|param| self.annot_to_ty(ast, *param))
+          .map(|param| self.annot_to_ty(ast, types, *param))
           .collect();
 
         let ret_id = ret
-          .map(|id| self.annot_to_ty(ast, id))
+          .map(|id| self.annot_to_ty(ast, types, id))
           .unwrap_or(ty_id::VOID);
 
         let ty = Type::Func { params: params_ids, ret: ret_id };
-        self.types.add_ty(ty)
+        types.add_ty(ty)
       },
       
-      // at this point it can only be a generic
-      TyAnnot::UserDef { name, generics } => todo!("userdef annot to type"),
+      TyAnnot::UserDef { name, generics } => todo!(),
+    };
+
+    id
+  }
+
+  fn check_expr(&mut self, ast: &Ast, types: &TypeEnv, id: ExprId) -> Result<TypeId, FrontendErrAlias> {
+    let (expr, span) = &ast.exprs[id.0 as usize];
+
+    let id = match expr {
+      Expr::Literal(lit) => match lit {
+        ExprLiteral::Bool(_) => ty_id::BOOL,
+        ExprLiteral::Int(_) => ty_id::INT,
+        ExprLiteral::Float(_) => ty_id::FLOAT,
+        ExprLiteral::Array(expr_ids) => todo!(),
+        ExprLiteral::Struct(ident_id, expr_ids) => todo!(),
+      }
+
+      Expr::Variable(ident) => self.binds.get(*ident)
+        .ok_or_else(|| self.err(ast, "undeclared variable", *span))?,
+      
+      Expr::Unary { op, rhs } => todo!(),
+      Expr::Binary { op, lhs, rhs } => todo!(),
+      Expr::Call { callee, args } => {
+        let callee_id = self.check_expr(ast, types, *callee)?;
+        let callee_ty = types.get(callee_id);
+
+        match callee_ty {
+          Type::Func { params, ret } => {
+            if params.len() != args.len() {
+              return Err(self.err(ast, "wrong arguments count in function call", *span))
+            }
+            // TODO: has type to be instantiated as global?
+
+            let mut generics_map = HashMap::new();
+            for (param, arg) in zip(params, args) {
+              let arg_ty = self.check_expr(ast, types, *arg)?;
+
+              types.generic_eq(*param, arg_ty, &mut generics_map)
+                .ok_or_else(|| self.err(ast, "impossible to instantiate generic function", *span))?;
+            }
+
+            // TODO: temporary hack
+            // types.generic_eq(*ret, ty_id::VOID, &mut generics_map)
+            //   .ok_or_else(|| self.err(ast, "impossible to instantiate generic function", *span))?;
+
+            *ret
+          }
+
+          _ => return Err(self.err(ast, "can't do function call on non function type", *span))
+        }
+      }
+      Expr::Member { lhs, field } => todo!(),
+      Expr::Index { lhs, idx } => todo!(),
+    };
+
+    Ok(id)
+  }
+
+  fn check_stmt(&mut self, ast: &Ast, types: &mut TypeEnv, id: StmtId) -> Result<(), FrontendErrAlias> {
+    let (stmt, span) = &ast.stmts[id.0 as usize];
+
+    match stmt {
+      Stmt::Decl(decl) => todo!(),
+      Stmt::Assign { lhs, rhs } => {
+        let lty = self.check_expr(ast, types, *lhs)?;
+        let rty = self.check_expr(ast, types, *rhs)?;
+
+        if !types.ty_eq(lty, rty)  {
+          return Err(self.err(ast, "assigning value of different type", *span));
+        }
+
+        Ok(())
+      },
+      Stmt::Block(stmt_ids) => self.check_block(ast, types, stmt_ids),
+      Stmt::IfElse { cond, iblock, eblock } => todo!(),
+      Stmt::While { cond, wblock } => todo!(),
+      Stmt::Return(expr_id) => todo!(),
+      Stmt::Expr(id) => self.check_expr(ast, types, *id).map(|_| ()),
     }
   }
 
-  fn check_expr(&mut self, ast: &Ast, id: ExprId) -> Result<TypeId, FrontendErrAlias> {
-    todo!()
+  fn check_block(&mut self, ast: &Ast, types: &mut TypeEnv, stmts: &[StmtId]) -> Result<(), FrontendErrAlias> {
+    self.scope(|c| {
+      for id in stmts {
+        c.check_stmt(ast, types, *id);
+      }
+    });
+
+    Ok(())
   }
 
-  fn check_toplvl(&mut self, ast: &Ast) {
+  fn check_toplvl(&mut self, ast: &Ast, types: &mut TypeEnv) {
     // add all declared userdefs (structs)
     for (stmt, span) in &ast.toplvl {
       match stmt {
         StmtTopLvl::Decl(_) | StmtTopLvl::FnDecl {..} => {},
-        StmtTopLvl::StructDecl { name, fields } => {
+        StmtTopLvl::StructDecl { name, .. } => {
           // TODO: not sure if parser should return hashmap
 
-          let fields_ids = fields.iter()
-            .map(|(ident, field)| (*ident, self.annot_to_ty(ast, *field)))
-            .collect();
-          let ty = Type::Struct { name: *name, fields: fields_ids };
-
-          if self.types.add_userdef(*name, ty).is_some() {
-            self.err(ast, "already declared struct", *span);
+          // only add the name to the types, do not parse fields yet
+          let ty = Type::Struct { name: *name, fields: Vec::new() };
+          match types.add_userdef(*name, ty) {
+            Some(_) => {}
+            None => { self.err(ast, "already declared struct", *span); }
           }
         },
       }
     }
 
-    // then add all declared functions
+    
+    // then add all declared functions signatures and check struct fields
     for (stmt, _) in &ast.toplvl {
       match stmt {
-        StmtTopLvl::Decl(_) | StmtTopLvl::StructDecl { .. } => {},
-        StmtTopLvl::FnDecl { name, generics, params, ret, .. } => {
-          // handle generics
-          if !generics.is_empty() {
-            for param in params {
+        StmtTopLvl::Decl(_) => {}
+        
+        StmtTopLvl::StructDecl { name, fields } => {
+          // check struct fields
 
-            }
-          }
-          
+          let fields_ids = fields.iter()
+          .map(|(ident, field)| (*ident, self.annot_to_ty(ast, types, *field)))
+          .collect();
+
+          let ty = Type::Struct { name: *name, fields: fields_ids };
+          types.add_userdef(*name, ty);
+        },
+
+        StmtTopLvl::FnDecl { name, params, ret, .. } => {
           let params_ids = params.iter()
-            .map(|(_, annot)| self.annot_to_ty(ast, *annot))
+            .map(|(_, annot)| self.annot_to_ty(ast, types, *annot))
             .collect();
 
           let ret_id = ret
-            .map(|id| self.annot_to_ty(ast, id))
+            .map(|id| self.annot_to_ty(ast, types, id))
             .unwrap_or(ty_id::VOID);
 
           let ty = Type::Func { params: params_ids, ret: ret_id };
-          let ty_id = self.types.add_ty(ty);
+          let ty_id = types.add_ty(ty);
           self.binds.add(*name, ty_id);
         },
       }
@@ -361,11 +386,11 @@ impl Typechecker {
       match stmt {
         StmtTopLvl::FnDecl { .. } | StmtTopLvl::StructDecl { .. } => {},
         StmtTopLvl::Decl(decl) => {
-          let rhs_ty = self.check_expr(ast, decl.rhs);
+          let rhs_ty = self.check_expr(ast, types, decl.rhs);
 
           match rhs_ty {
             Ok(ty_id) => {
-              todo!("check variable declaration")
+              
             }
             Err(e) => continue,
           }
@@ -377,8 +402,22 @@ impl Typechecker {
     for (stmt, span) in &ast.toplvl {
       match stmt {
         StmtTopLvl::Decl(_) | StmtTopLvl::StructDecl { .. } => {},
-        StmtTopLvl::FnDecl { name, generics, params, ret, block } => {
-          todo!("check function body")
+        StmtTopLvl::FnDecl { params, block, .. } => {
+          let params = params.clone();
+
+          self.scope(|c| {
+            for param in &params {
+              // TODO: this is done twice!
+              let ty = c.annot_to_ty(ast, types, param.1);
+
+              if !c.binds.add(param.0, ty) {
+                c.err(ast, "parameter with same name already declared", *span);
+                continue;
+              }
+            }
+
+            _ = c.check_stmt(ast, types, *block);
+          });
         }
       }
     }
@@ -387,5 +426,6 @@ impl Typechecker {
 
 pub fn check(ast: &mut Ast) {
   let mut checker = Typechecker::default();
-  checker.check_toplvl(&ast);
+  let mut types = TypeEnv::default();
+  checker.check_toplvl(&ast, &mut types);
 }

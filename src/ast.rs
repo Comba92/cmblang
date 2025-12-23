@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt, hash::{self, Hash, Hasher}, iter::zip};
+use std::{collections::HashMap, fmt, hash::{self, Hash, Hasher}};
 use crate::{IdSize, lexer::{Lexer, Span}, parser::{Expr, Spanned, Stmt, StmtTopLvl, TyAnnot}};
 
 pub struct Ast<'a> {

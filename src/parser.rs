@@ -334,82 +334,6 @@ impl<'a> Parser<'a> {
     Ok(lhs)
   }
 
-  // fn parse_annot(&mut self) -> ParserResult<TypeId> {
-  //   let t = self.cursor.eat();
-
-  //   let ty = match t.kind {
-  //     TokenKind::Keyword(k) => match k {
-  //       KeywordKind::Bool => ty_id::BOOL,
-  //       KeywordKind::Int => ty_id::INT,
-  //       KeywordKind::Float => ty_id::FLOAT,
-  //       _ => return Err(self.err("invalid type annotation", t)),
-  //     }
-
-  //     // function
-  //     TokenKind::ParenL => {
-  //       let params = self.collect_listing(
-  //         Self::parse_annot,
-  //         TokenKind::Comma,
-  //         TokenKind::ParenR,
-  //         "unclosed parenthesis in function annotation's params")?;
- 
-  //       let ret = if self.cursor.eat_if(TokenKind::Arrow).is_some() {
-  //         self.parse_annot()?
-  //       } else { ty_id::VOID };
-
-  //       self.types.add_ty(Type::Func { params, ret })
-  //     }
-
-  //     // array
-  //     TokenKind::BraceL => {
-  //       let inner = self.parse_annot()?;
-  //       self.expect(TokenKind::Colon, "expect ':' after array inner type")?;
-        
-  //       // TODO: might be cool if this can be a constant integer expression?
-  //       let len_tok = self.cursor.eat();
-
-  //       let len = match len_tok.kind {
-  //         // size will be inferred later
-  //         TokenKind::Star => 0,
-  //         TokenKind::IntLit => self.cursor.lexer.get_str(len_tok)
-  //           .parse()
-  //           .map_err(|e| self.err(format!("impossible to parse integer literal: {e}"), len_tok))?,
-
-  //         _ => return Err(self.err("expect integer literal or '*' (inferred size) for size in array type annotation", len_tok)) 
-  //       };
-
-  //       self.expect(TokenKind::BraceR, "expect closing ']' in array type annotation")?;
-
-  //       self.types.add_ty(Type::Array { inner, len })
-  //     }
-
-  //     TokenKind::Ident => {
-  //       // this only adds a user defined dummy type to the environment
-  //       // later the typechecker will update this type to the correct one
-
-  //       let name = self.push_ident(t);
-
-  //       // TODO: should be set
-  //       let generics = if self.cursor.eat_if(TokenKind::Less).is_some() {
-  //         // generics
-  //         self.collect_listing(
-  //           |p| p.expect_ident("expect generics listing"),
-  //           TokenKind::Comma,
-  //           TokenKind::Great,
-  //         "unclosed generics listing")?
-  //       } else {
-  //         Vec::new()
-  //       };
-
-  //       self.types.add_ty(Type::UserDef(name))
-  //     },
-
-  //     _ => return Err(self.err("invalid type annotation", t)),
-  //   };
-
-  //   Ok(ty)
-  // }
-
   fn parse_annot(&mut self) -> ParseResult<TyAnnotId> {
     let t = self.cursor.eat();
 
@@ -625,8 +549,6 @@ impl<'a> Parser<'a> {
     let ident = self.expect_ident("expect name after 'fn' keyword")?;
 
     let generics = if self.cursor.eat_if(TokenKind::Less).is_some() {
-      // todo: this does two allocations!
-      
       self.collect_listing_unique(
         |p| p.expect_ident("expected generic identifier"),
         TokenKind::Great,

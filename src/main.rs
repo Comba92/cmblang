@@ -3,7 +3,7 @@ use std::{error, fmt};
 mod lexer;
 mod parser;
 mod ast;
-// mod typecheck;
+mod typecheck;
 
 pub type FrontendErrAlias = FrontendErr;
 pub type IdSize = u32;
@@ -67,6 +67,13 @@ trait CursorIter<Inner> {
   fn has_some(&self) -> bool { self.curr() < self.start().len() as u32 }
 }
 
+fn dbg_list<T: fmt::Debug>(list: &[T]) {
+  for item in list.iter().enumerate() {
+    println!("{} -> {:?}", item.0, item.1);
+  }
+  println!()
+}
+
 fn main() {
   println!("Hello World!");
 
@@ -78,29 +85,14 @@ fn main() {
   // }
 
   let mut ast = parser::parse(src).unwrap();
-  // typecheck::check(&mut ast);
+  typecheck::check(&mut ast);
   
   println!();
 
-  for expr in ast.exprs {
-    println!("{expr:?}");
-  }
-  println!();
-
-  for stmt in ast.toplvl {
-    println!("{stmt:?}");
-  }
-  println!();
-
-  for stmt in ast.stmts {
-    println!("{stmt:?}");
-  }
-  println!();
-
-  for ty in ast.annots {
-    println!("{ty:?}");
-  }
-  println!();
+  dbg_list(&ast.exprs);
+  dbg_list(&ast.stmts);
+  dbg_list(&ast.toplvl);
+  dbg_list(&ast.annots);
 
   println!("{:?}", ast.idents.buf);
 }
