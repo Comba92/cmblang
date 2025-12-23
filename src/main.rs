@@ -3,7 +3,7 @@ use std::{error, fmt};
 mod lexer;
 mod parser;
 mod ast;
-mod typecheck;
+// mod typecheck;
 
 pub type FrontendErrAlias = FrontendErr;
 pub type IdSize = u32;
@@ -78,7 +78,7 @@ fn main() {
   // }
 
   let mut ast = parser::parse(src).unwrap();
-  typecheck::check(&mut ast);
+  // typecheck::check(&mut ast);
   
   println!();
 
@@ -97,8 +97,8 @@ fn main() {
   }
   println!();
 
-  for (i, ty) in ast.types.types_heap.iter().enumerate() {
-    println!("{i} -> {ty:?}");
+  for ty in ast.annots {
+    println!("{ty:?}");
   }
   println!();
 

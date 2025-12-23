@@ -1,13 +1,15 @@
-use std::collections::{HashMap, HashSet};
+use std::{collections::{HashMap, HashSet}, hash::Hash};
 
-use crate::{CursorIter, FrontendErrAlias, IdSize, ast::{Ast, IdentId, StringInterner, Type, TypeEnv, TypeId, ty_id}, lexer::{self, KeywordKind, Lexer, Span, Token, TokenKind}}; 
+use crate::{CursorIter, FrontendErrAlias, IdSize, ast::{self, Ast, IdentId, StringInterner}, lexer::{self, KeywordKind, Lexer, Span, Token, TokenKind}}; 
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TokenId(pub IdSize);
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExprId(pub IdSize);
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StmtId(pub IdSize);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TyAnnotId(pub IdSize);
 
 #[derive(Debug)]
 pub enum ExprLiteral {
@@ -67,7 +69,7 @@ fn infix_lvl(kind: TokenKind) -> (i8, i8) {
 #[derive(Debug)]
 pub struct Decl {
   pub ident: IdentId,
-  pub annot: TypeId,
+  pub annot: TyAnnotId,
   pub rhs: ExprId,
   pub constant: bool
 }
@@ -87,13 +89,24 @@ pub enum Stmt {
 #[derive(Debug)]
 pub enum StmtTopLvl {
   Decl(Decl),
-  // TODO: generics should be set, params a map
-  FnDecl { name: IdentId, generics: Vec<IdentId>, params: Vec<(IdentId, TypeId)>, ret: TypeId, block: StmtId },
-  // TODO: fields should be a map
-  StructDecl { name: IdentId, fields: Vec<(IdentId, TypeId)> },
+  FnDecl { name: IdentId, params: Vec<(IdentId, TyAnnotId)>, ret: Option<TyAnnotId>, block: StmtId },
+  StructDecl { name: IdentId, fields: HashMap<IdentId, TyAnnotId> },
 }
 
-type ParserResult<T> = Result<T, FrontendErrAlias>;
+#[derive(Debug)]
+pub enum TyAnnot {
+  Untyped,
+  Bool,
+  Int,
+  Float,
+  Void,
+  Generic(IdentId),
+  Array { inner: TyAnnotId, len: Option<ExprId> },
+  Func { params: Vec<TyAnnotId>, ret: Option<TyAnnotId> },
+  UserDef { name: IdentId, generics: Vec<TyAnnotId> }
+}
+
+type ParseResult<T> = Result<T, FrontendErrAlias>;
 pub type Spanned<T> = (T, Span);
 
 struct Parser<'a> {
@@ -102,7 +115,7 @@ struct Parser<'a> {
   exprs: Vec<Spanned<Expr>>,
   stmts: Vec<Spanned<Stmt>>,
   toplvl: Vec<Spanned<StmtTopLvl>>,
-  types: TypeEnv,
+  annots: Vec<Spanned<TyAnnot>>,
   idents: StringInterner,
 }
 
@@ -113,7 +126,7 @@ impl<'a> Parser<'a> {
       exprs: vec![],
       stmts: vec![],
       toplvl: vec![],
-      types: Default::default(),
+      annots: Default::default(),
       idents: Default::default(),
     }
   }
@@ -126,7 +139,7 @@ impl<'a> Parser<'a> {
     )
   }
 
-  fn expect_ex<S: Into<String>>(&mut self, target: TokenKind, msg: S, err_tok: Token) -> ParserResult<Token> {
+  fn expect_ex<S: Into<String>>(&mut self, target: TokenKind, msg: S, err_tok: Token) -> ParseResult<Token> {
     let t = self.cursor.eat();
     if t.kind != target {
       Err(self.err(msg, err_tok))
@@ -134,11 +147,11 @@ impl<'a> Parser<'a> {
     else { Ok(t) }
   }
 
-  fn expect<S: Into<String>>(&mut self, target: TokenKind, msg: S) -> ParserResult<Token> {
+  fn expect<S: Into<String>>(&mut self, target: TokenKind, msg: S) -> ParseResult<Token> {
     self.expect_ex(target, msg, self.cursor.peek())
   }
 
-  fn expect_ident<S: Into<String>>(&mut self, msg: S) -> ParserResult<IdentId> {
+  fn expect_ident<S: Into<String>>(&mut self, msg: S) -> ParseResult<IdentId> {
     let name = self.expect(TokenKind::Ident, msg)?;
     let id = self.idents.intern(name.span.get_str(self.cursor.lexer.src));
     Ok(id)
@@ -159,13 +172,18 @@ impl<'a> Parser<'a> {
     StmtId(self.toplvl.len() as IdSize - 1)
   }
   
-  pub fn push_ident(&mut self, tok: Token) -> IdentId {
+  fn push_ident(&mut self, tok: Token) -> IdentId {
     self.idents.intern(tok.span.get_str(self.cursor.lexer.src))
   }
 
-  fn collect_listing<T, F>(&mut self, getter: F, separator: TokenKind, terminator: TokenKind, err_unclosed: &str) -> ParserResult<Vec<T>>
+  fn push_annot(&mut self, ann: TyAnnot, span: Span) -> TyAnnotId {
+    self.annots.push((ann, span));
+    TyAnnotId(self.annots.len() as IdSize - 1)
+  }
+
+  fn collect_listing<T, F>(&mut self, getter: F, terminator: TokenKind, err_unclosed: &str) -> ParseResult<Vec<T>>
     where
-      F: Fn(&mut Self) -> ParserResult<T>,
+      F: Fn(&mut Self) -> ParseResult<T>,
   {
     let mut list = Vec::new();
     loop {
@@ -177,7 +195,7 @@ impl<'a> Parser<'a> {
       let item = getter(self)?;
       list.push(item);
 
-      if self.cursor.eat_if(separator).is_none() {
+      if self.cursor.eat_if(TokenKind::Comma).is_none() {
         // if we don't find a comma, we are expecting a paren closing
         // if we don't get a paren closing, it is an error
         if self.cursor.eat_if(terminator).is_some() { break }
@@ -187,7 +205,41 @@ impl<'a> Parser<'a> {
     Ok(list)
   }
 
-  fn parse_expr(&mut self, prec_lvl: i8) -> ParserResult<ExprId> {
+  fn collect_listing_unique<T, F, E1, E2>(&mut self, getter: F, terminator: TokenKind, err_unclosed: E1, err_duplicates: E2) -> ParseResult<(Vec<T>, HashSet<T>)> 
+    where
+      T: Eq + Hash + Clone,
+      F: Fn(&mut Self) -> ParseResult<T>,
+      E1: Into<&'a str>,
+      E2: Into<String>,
+  {
+    let mut list = Vec::new();
+    let mut found = HashSet::new();
+    loop {
+      if !self.cursor.has_some() {
+        return Err(self.err(err_unclosed.into(), self.cursor.lexer.eof()))
+      }
+      if self.cursor.eat_if(terminator).is_some() { break }
+
+      let tok = self.cursor.peek();
+      let item = getter(self)?;
+
+      if !found.insert(item.clone()) {
+        return Err(self.err(err_duplicates, tok))
+      }
+
+      list.push(item);
+
+      if self.cursor.eat_if(TokenKind::Comma).is_none() {
+        // if we don't find a comma, we are expecting a paren closing
+        // if we don't get a paren closing, it is an error
+        if self.cursor.eat_if(terminator).is_some() { break }
+      }
+    }
+
+    Ok((list, found))
+  }
+
+  fn parse_expr(&mut self, prec_lvl: i8) -> ParseResult<ExprId> {
     let tok_id = self.cursor.curr_id();
     let t = self.cursor.eat();
 
@@ -208,7 +260,6 @@ impl<'a> Parser<'a> {
           // rn we only expect the members in order
           let members = self.collect_listing(
             |p| p.parse_expr(0),
-            TokenKind::Comma,
             TokenKind::CurlyR,
           "unclosed struct literal")?;
           
@@ -232,9 +283,9 @@ impl<'a> Parser<'a> {
       }
 
       BraceL => {
+        // array literal
         let exprs = self.collect_listing(
           |p| p.parse_expr(0),
-          TokenKind::Comma,
           TokenKind::BraceR,
           "unclosed array literal")?;
 
@@ -259,7 +310,6 @@ impl<'a> Parser<'a> {
           TokenKind::ParenL => {
             let args = self.collect_listing(
               |p| p.parse_expr(0),
-              TokenKind::Comma, 
               TokenKind::ParenR,
               "unclosed function call")?;
             
@@ -284,51 +334,133 @@ impl<'a> Parser<'a> {
     Ok(lhs)
   }
 
-  fn parse_annot(&mut self) -> ParserResult<TypeId> {
+  // fn parse_annot(&mut self) -> ParserResult<TypeId> {
+  //   let t = self.cursor.eat();
+
+  //   let ty = match t.kind {
+  //     TokenKind::Keyword(k) => match k {
+  //       KeywordKind::Bool => ty_id::BOOL,
+  //       KeywordKind::Int => ty_id::INT,
+  //       KeywordKind::Float => ty_id::FLOAT,
+  //       _ => return Err(self.err("invalid type annotation", t)),
+  //     }
+
+  //     // function
+  //     TokenKind::ParenL => {
+  //       let params = self.collect_listing(
+  //         Self::parse_annot,
+  //         TokenKind::Comma,
+  //         TokenKind::ParenR,
+  //         "unclosed parenthesis in function annotation's params")?;
+ 
+  //       let ret = if self.cursor.eat_if(TokenKind::Arrow).is_some() {
+  //         self.parse_annot()?
+  //       } else { ty_id::VOID };
+
+  //       self.types.add_ty(Type::Func { params, ret })
+  //     }
+
+  //     // array
+  //     TokenKind::BraceL => {
+  //       let inner = self.parse_annot()?;
+  //       self.expect(TokenKind::Colon, "expect ':' after array inner type")?;
+        
+  //       // TODO: might be cool if this can be a constant integer expression?
+  //       let len_tok = self.cursor.eat();
+
+  //       let len = match len_tok.kind {
+  //         // size will be inferred later
+  //         TokenKind::Star => 0,
+  //         TokenKind::IntLit => self.cursor.lexer.get_str(len_tok)
+  //           .parse()
+  //           .map_err(|e| self.err(format!("impossible to parse integer literal: {e}"), len_tok))?,
+
+  //         _ => return Err(self.err("expect integer literal or '*' (inferred size) for size in array type annotation", len_tok)) 
+  //       };
+
+  //       self.expect(TokenKind::BraceR, "expect closing ']' in array type annotation")?;
+
+  //       self.types.add_ty(Type::Array { inner, len })
+  //     }
+
+  //     TokenKind::Ident => {
+  //       // this only adds a user defined dummy type to the environment
+  //       // later the typechecker will update this type to the correct one
+
+  //       let name = self.push_ident(t);
+
+  //       // TODO: should be set
+  //       let generics = if self.cursor.eat_if(TokenKind::Less).is_some() {
+  //         // generics
+  //         self.collect_listing(
+  //           |p| p.expect_ident("expect generics listing"),
+  //           TokenKind::Comma,
+  //           TokenKind::Great,
+  //         "unclosed generics listing")?
+  //       } else {
+  //         Vec::new()
+  //       };
+
+  //       self.types.add_ty(Type::UserDef(name))
+  //     },
+
+  //     _ => return Err(self.err("invalid type annotation", t)),
+  //   };
+
+  //   Ok(ty)
+  // }
+
+  fn parse_annot(&mut self) -> ParseResult<TyAnnotId> {
     let t = self.cursor.eat();
 
-    let ty = match t.kind {
+    let annot = match t.kind {
       TokenKind::Keyword(k) => match k {
-        KeywordKind::Bool => ty_id::BOOL,
-        KeywordKind::Int => ty_id::INT,
-        KeywordKind::Float => ty_id::FLOAT,
+        KeywordKind::Bool => TyAnnot::Bool,
+        KeywordKind::Int => TyAnnot::Int,
+        KeywordKind::Float => TyAnnot::Float,
         _ => return Err(self.err("invalid type annotation", t)),
       }
 
+      // function
       TokenKind::ParenL => {
         let params = self.collect_listing(
           Self::parse_annot,
-          TokenKind::Comma,
           TokenKind::ParenR,
           "unclosed parenthesis in function annotation's params")?;
  
         let ret = if self.cursor.eat_if(TokenKind::Arrow).is_some() {
-          self.parse_annot()?
-        } else { ty_id::VOID };
+          Some(self.parse_annot()?)
+        } else { None };
 
-        self.types.add_ty(Type::Func { params, ret })
+        TyAnnot::Func { params, ret }
       }
 
+      // array
       TokenKind::BraceL => {
         let inner = self.parse_annot()?;
         self.expect(TokenKind::Colon, "expect ':' after array inner type")?;
         
         // TODO: might be cool if this can be a constant integer expression?
-        let len_tok = self.cursor.eat();
+        let len_tok = self.cursor.peek();
 
         let len = match len_tok.kind {
           // size will be inferred later
-          TokenKind::Star => 0,
-          TokenKind::IntLit => self.cursor.lexer.get_str(len_tok)
-            .parse()
-            .map_err(|e| self.err(format!("impossible to parse integer literal: {e}"), len_tok))?,
+          TokenKind::Star => {
+            self.cursor.advance();
+            None
+          }
+          // TokenKind::IntLit => self.cursor.lexer.get_str(len_tok)
+          //   .parse()
+          //   .map_err(|e| self.err(format!("impossible to parse integer literal: {e}"), len_tok))?,
 
-          _ => return Err(self.err("expect integer literal or '*' (inferred size) for size in array type annotation", len_tok)) 
+          // _ => return Err(self.err("expect integer literal or '*' (inferred size) for size in array type annotation", len_tok))
+          // TODO: this should be const
+          _ => Some(self.parse_expr(0)?)
         };
 
         self.expect(TokenKind::BraceR, "expect closing ']' in array type annotation")?;
 
-        self.types.add_ty(Type::Array { inner, len })
+        TyAnnot::Array { inner, len }
       }
 
       TokenKind::Ident => {
@@ -336,24 +468,61 @@ impl<'a> Parser<'a> {
         // later the typechecker will update this type to the correct one
 
         let name = self.push_ident(t);
-        self.types.add_userdef(name, Type::UserDef(name)).0
+
+        let generics = if self.cursor.eat_if(TokenKind::Less).is_some() {
+          // generics
+          self.collect_listing(
+            Self::parse_annot,
+            TokenKind::Great,
+          "unclosed generics listing")?
+        } else {
+          Vec::new()
+        };
+
+        TyAnnot::UserDef { name, generics }
       },
 
       _ => return Err(self.err("invalid type annotation", t)),
     };
 
-    Ok(ty)
+    Ok(self.push_annot(annot, t.span))
   }
 
-  fn parse_decl(&mut self, name: Token, constant: bool) -> ParserResult<(Decl, Span)> {
+  // fn parse_decl(&mut self, name: Token, constant: bool) -> ParseResult<(Decl, Span)> {
+  //   let ident = self.push_ident(name.clone());
+
+  //   // // eat ':'
+  //   // self.cursor.advance();
+
+  //   let ty_id = if self.cursor.peek().kind == TokenKind::Assign {
+  //     self.cursor.advance();
+  //     ty_id::UNTYPED
+  //   } else if self.cursor.peek().kind == TokenKind::Colon {
+  //     self.cursor.advance();
+  //     let id = self.parse_annot()?;
+
+  //     // eat '='
+  //     self.expect(TokenKind::Assign, "expect '=' after type annotation")?;
+  //     id
+  //   } else {
+  //     return Err(self.err("Expect ':' or '=' after declaration name", name))
+  //   };
+    
+  //   let rhs = self.parse_expr(0)?;
+  //   let decl = Decl { ident, annot: ty_id, rhs, constant };
+  //   Ok((decl, name.span))
+  // }
+
+  fn parse_decl(&mut self, name: Token, constant: bool) -> ParseResult<(Decl, Span)> {
     let ident = self.push_ident(name.clone());
 
     // // eat ':'
     // self.cursor.advance();
 
-    let ty_id = if self.cursor.peek().kind == TokenKind::Assign {
+    let t = self.cursor.peek();
+    let annot = if t.kind == TokenKind::Assign {
       self.cursor.advance();
-      ty_id::UNTYPED
+      self.push_annot(TyAnnot::Untyped, t.span)
     } else if self.cursor.peek().kind == TokenKind::Colon {
       self.cursor.advance();
       let id = self.parse_annot()?;
@@ -366,11 +535,11 @@ impl<'a> Parser<'a> {
     };
     
     let rhs = self.parse_expr(0)?;
-    let decl = Decl { ident, annot: ty_id, rhs, constant };
+    let decl = Decl { ident, annot, rhs, constant };
     Ok((decl, name.span))
   }
   
-  fn parse_let_or_const(&mut self, constant: bool, toplvl: bool) -> ParserResult<StmtId> {
+  fn parse_let_or_const(&mut self, constant: bool, toplvl: bool) -> ParseResult<StmtId> {
     // eat 'let' or 'const'
     let t = self.cursor.eat();
 
@@ -392,7 +561,7 @@ impl<'a> Parser<'a> {
     Ok(id)
   }
 
-  fn parse_assign(&mut self, lhs: ExprId) -> ParserResult<StmtId> {
+  fn parse_assign(&mut self, lhs: ExprId) -> ParseResult<StmtId> {
     // eat '='
     let t = self.cursor.eat();
     let rhs = self.parse_expr(0)?;
@@ -401,25 +570,76 @@ impl<'a> Parser<'a> {
     Ok(stmt)
   }
 
-  fn parse_func(&mut self) -> ParserResult<StmtId> {
+  fn resolve_generics(&mut self, id: TyAnnotId, generics_set: &HashSet<IdentId>) -> ParseResult<()> {
+    let (annot, span) = &mut self.annots[id.0 as usize];
+
+    match annot {
+      TyAnnot::UserDef { name, generics } => {
+          if generics_set.contains(name) {
+            // it is a generic
+
+            if !generics.is_empty() {
+              return Err(FrontendErrAlias::new(
+                &self.cursor.lexer, 
+                "generic type can't have a generics list",
+                *span
+              ))
+            }
+
+            // edit the annotation from UserDef to Generic
+            *annot = TyAnnot::Generic(*name);
+          }
+        }
+
+      TyAnnot::Generic(_) => unreachable!("shouldn't find generics during function generic resoltion"),
+
+      // not a generic
+      TyAnnot::Untyped | TyAnnot::Bool | TyAnnot::Int | TyAnnot::Float | TyAnnot::Void => {},
+
+      TyAnnot::Array { inner, .. } => {
+        let inner = *inner;
+        self.resolve_generics(inner, generics_set)?;
+      },
+
+      TyAnnot::Func { params, ret } => {
+        let params = params.clone();
+        let ret = *ret;
+
+        for param in params {
+          self.resolve_generics(param, generics_set)?;
+        }
+
+        if let Some(ret) = ret {
+          self.resolve_generics(ret, generics_set)?;
+        }
+      },
+    }
+
+    Ok(())
+  }
+
+  fn parse_func(&mut self) -> ParseResult<StmtId> {
     // eat 'fn'
     let t = self.cursor.eat();
 
     let ident = self.expect_ident("expect name after 'fn' keyword")?;
 
     let generics = if self.cursor.eat_if(TokenKind::Less).is_some() {
-      self.collect_listing(
+      // todo: this does two allocations!
+      
+      self.collect_listing_unique(
         |p| p.expect_ident("expected generic identifier"),
-        TokenKind::Comma,
         TokenKind::Great,
-        "unclosed generics listing")?
+        "unclosed generics listing",
+        "repeated function generic parameter name"
+      )?.1
     } else {
-      Vec::new()
+      HashSet::new()
     };
 
     self.expect(TokenKind::ParenL, "expect '(' after function name")?;
 
-    let params = self.collect_listing(
+    let params = self.collect_listing_unique(
       |p| {
         let ident = p.expect_ident("expect param name in function signature")?;
         p.expect(TokenKind::Colon, "expect ':' after param name")?;
@@ -427,29 +647,43 @@ impl<'a> Parser<'a> {
 
         Ok((ident, ty))
       },
-      TokenKind::Comma,
       TokenKind::ParenR,
-      "unclosed parenthesis in function declaration's parameters")?;
+      "unclosed parenthesis in function declaration's parameters",
+      "repeated function parameter name"
+    )?.0;
 
     let ret = if self.cursor.eat_if(TokenKind::Arrow).is_some() {
-      self.parse_annot()?
+      Some(self.parse_annot()?)
     } else {
-      ty_id::VOID
+      None
     };
+
+    // resolve generics
+    if !generics.is_empty() {
+      for param in &params {
+        self.resolve_generics(param.1, &generics)?;
+      }
+
+      if let Some(ret) = &ret {
+        self.resolve_generics(*ret, &generics)?;
+      }
+    }
 
     let block = self.parse_block()?;
 
-    Ok(self.push_toplvl(StmtTopLvl::FnDecl { name: ident, generics, params, ret, block }, t.span))
+    Ok(self.push_toplvl(StmtTopLvl::FnDecl { name: ident, params, ret, block }, t.span))
   }
 
-  fn parse_struct(&mut self) -> ParserResult<StmtId> {
+  fn parse_struct(&mut self) -> ParseResult<StmtId> {
     // eat 'struct'
     let t = self.cursor.eat();
 
     let name = self.expect_ident("expect struct name after 'struct' keyword")?;
     self.expect(TokenKind::CurlyL, "expect '{' after struct name")?;
   
-    let fields = self.collect_listing(
+    // TODO: this dows 2 allocations!!
+
+    let fields = self.collect_listing_unique(
       |p| {
         let ident = p.expect_ident("expect field name in struct declaration")?;
 
@@ -458,16 +692,19 @@ impl<'a> Parser<'a> {
 
         Ok((ident, ty))
       },
-      TokenKind::Comma,
       TokenKind::CurlyR,
-      "expect '}' after struct fields")?;
+      "expect '}' after struct fields",
+      "repeated struct field name",
+    )?.0
+      .into_iter()
+      .collect();
 
     // let ty = self.push_annot(Type::Struct { name: ident, fields }, t.span);
 
     Ok(self.push_toplvl(StmtTopLvl::StructDecl { name, fields }, t.span))
   }
 
-  fn parse_block(&mut self) -> ParserResult<StmtId> {
+  fn parse_block(&mut self) -> ParseResult<StmtId> {
     // eat '{'
     let t = self.cursor.eat();
     
@@ -485,15 +722,15 @@ impl<'a> Parser<'a> {
     return Err(self.err("unclosed block", t))
   }
 
-  fn parse_ifelse(&mut self) -> ParserResult<StmtId> {
+  fn parse_ifelse(&mut self) -> ParseResult<StmtId> {
     todo!()
   }
 
-  fn parse_while(&mut self) -> ParserResult<StmtId> {
+  fn parse_while(&mut self) -> ParseResult<StmtId> {
     todo!()
   }
 
-  fn parse_stmt(&mut self) -> ParserResult<StmtId> {
+  fn parse_stmt(&mut self) -> ParseResult<StmtId> {
     let t = self.cursor.peek();
 
     let stmt = match t.kind {
@@ -537,7 +774,7 @@ impl<'a> Parser<'a> {
     Ok(stmt)
   }
 
-  fn parse_toplvl(&mut self) -> ParserResult<StmtId> {
+  fn parse_toplvl(&mut self) -> ParseResult<StmtId> {
     let t = self.cursor.peek();
 
     let stmt = match t.kind {
@@ -558,7 +795,7 @@ impl<'a> Parser<'a> {
   }
 }
 
-pub fn parse(src: &str) -> ParserResult<Ast> {
+pub fn parse(src: &str) -> ParseResult<Ast> {
   let lexer = lexer::tokenize(src)?;
   let mut parser = Parser::new(&lexer);
   
@@ -576,7 +813,7 @@ pub fn parse(src: &str) -> ParserResult<Ast> {
     exprs: parser.exprs,
     stmts: parser.stmts,
     toplvl: parser.toplvl,
-    types: parser.types,
+    annots: parser.annots,
     idents: parser.idents,
     lexer,
   })
