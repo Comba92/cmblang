@@ -1,6 +1,6 @@
 use std::{collections::{HashMap, HashSet}, hash::Hash};
 
-use crate::{CursorIter, FrontendErrAlias, IdSize, ast::{self, Ast, IdentId, StringInterner}, lexer::{self, KeywordKind, Lexer, Span, Token, TokenKind}}; 
+use crate::{CursorIter, FrontendErrAlias, IdSize, ast::{Ast, IdentId, StringInterner}, lexer::{self, KeywordKind, Lexer, Span, Token, TokenKind}}; 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TokenId(pub IdSize);
@@ -89,7 +89,8 @@ pub enum Stmt {
 #[derive(Debug)]
 pub enum StmtTopLvl {
   Decl(Decl),
-  FnDecl { name: IdentId, params: Vec<(IdentId, TyAnnotId)>, ret: Option<TyAnnotId>, block: StmtId },
+  // we can split this into two enums
+  FnDecl { name: IdentId, params: Vec<(IdentId, TyAnnotId)>, ret: Option<TyAnnotId>, block: StmtId, is_generic: bool },
   StructDecl { name: IdentId, fields: HashMap<IdentId, TyAnnotId> },
 }
 
@@ -580,7 +581,7 @@ impl<'a> Parser<'a> {
     };
 
     // resolve generics
-    if !generics.is_empty() {
+    let is_generic = if !generics.is_empty() {
       for param in &params {
         self.resolve_generics(param.1, &generics)?;
       }
@@ -588,12 +589,15 @@ impl<'a> Parser<'a> {
       if let Some(ret) = &ret {
         self.resolve_generics(*ret, &generics)?;
       }
-    }
+      true
+    } else {
+      false
+    };
 
     let block = self.parse_block()?;
     // TODO: if there were any generics, this block could have generics as annotations; if not resolved they will stay userdefs
 
-    Ok(self.push_toplvl(StmtTopLvl::FnDecl { name: ident, params, ret, block }, t.span))
+    Ok(self.push_toplvl(StmtTopLvl::FnDecl { name: ident, params, ret, block, is_generic }, t.span))
   }
 
   fn parse_struct(&mut self) -> ParseResult<StmtId> {

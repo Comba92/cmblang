@@ -122,7 +122,7 @@ impl<'a> Ast<'a> {
     
     match s {
       StmtTopLvl::Decl(decl) => format!("Decl: {} {:?} {}", self.get_ident(decl.ident), decl.annot.map(|id| self.dbg_annot(id)), self.dbg_expr(decl.rhs)),
-      StmtTopLvl::FnDecl { name, params, ret, block } => {
+      StmtTopLvl::FnDecl { name, params, ret, block, .. } => {
         let mut str = format!("Func {}: (", self.get_ident(*name));
         for param in params {
           str.push_str(&format!("{}: {}, ", self.get_ident(param.0), self.dbg_annot(param.1)));
