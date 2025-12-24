@@ -69,7 +69,7 @@ fn infix_lvl(kind: TokenKind) -> (i8, i8) {
 #[derive(Debug)]
 pub struct Decl {
   pub ident: IdentId,
-  pub annot: TyAnnotId,
+  pub annot: Option<TyAnnotId>,
   pub rhs: ExprId,
   pub constant: bool
 }
@@ -95,11 +95,9 @@ pub enum StmtTopLvl {
 
 #[derive(Debug)]
 pub enum TyAnnot {
-  Untyped,
   Bool,
   Int,
   Float,
-  Void,
   Generic(IdentId),
   Array { inner: TyAnnotId, len: Option<ExprId> },
   Func { params: Vec<TyAnnotId>, ret: Option<TyAnnotId> },
@@ -446,14 +444,15 @@ impl<'a> Parser<'a> {
     let t = self.cursor.peek();
     let annot = if t.kind == TokenKind::Assign {
       self.cursor.advance();
-      self.push_annot(TyAnnot::Untyped, t.span)
+      // self.push_annot(TyAnnot::Untyped, t.span)
+      None
     } else if self.cursor.peek().kind == TokenKind::Colon {
       self.cursor.advance();
       let id = self.parse_annot()?;
 
       // eat '='
       self.expect(TokenKind::Assign, "expect '=' after type annotation")?;
-      id
+      Some(id)
     } else {
       return Err(self.err("Expect ':' or '=' after declaration name", name))
     };
@@ -518,7 +517,7 @@ impl<'a> Parser<'a> {
       TyAnnot::Generic(_) => unreachable!("shouldn't find generics during function generic resoltion"),
 
       // not a generic
-      TyAnnot::Untyped | TyAnnot::Bool | TyAnnot::Int | TyAnnot::Float | TyAnnot::Void => {},
+      TyAnnot::Bool | TyAnnot::Int | TyAnnot::Float => {},
 
       TyAnnot::Array { inner, .. } => {
         let inner = *inner;
@@ -592,6 +591,7 @@ impl<'a> Parser<'a> {
     }
 
     let block = self.parse_block()?;
+    // TODO: if there were any generics, this block could have generics as annotations; if not resolved they will stay userdefs
 
     Ok(self.push_toplvl(StmtTopLvl::FnDecl { name: ident, params, ret, block }, t.span))
   }

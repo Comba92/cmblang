@@ -78,21 +78,15 @@ fn main() {
   println!("Hello World!");
 
   let src = include_str!("../test2.cmb");
-  // let lexer = lexer::tokenize(src).unwrap();
-
-  // for tok in lexer.tokens.iter() {
-  //   println!("{tok:?}");
-  // }
 
   let mut ast = parser::parse(src).unwrap();
-  typecheck::check(&mut ast);
+  let checker = typecheck::check(&mut ast);
   
   println!();
 
-  dbg_list(&ast.exprs);
-  dbg_list(&ast.stmts);
-  dbg_list(&ast.toplvl);
-  dbg_list(&ast.annots);
-
-  println!("{:?}", ast.idents.buf);
+  ast.dbg_idents();
+  ast.dbg_exprs();
+  ast.dbg_stmts();
+  ast.dbg_toplvls();
+  ast.dbg_annots();
 }
