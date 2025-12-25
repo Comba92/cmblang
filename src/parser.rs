@@ -486,6 +486,11 @@ impl<'a> Parser<'a> {
 
             // edit the annotation from UserDef to Generic
             *annot = TyAnnot::Generic(*name);
+          } else {
+            // TODO: can we do something about cloning here?
+            for generic in generics.clone() {
+              self.resolve_generics(generic, generics_set)?;
+            }
           }
         }
 
@@ -500,6 +505,7 @@ impl<'a> Parser<'a> {
       },
 
       TyAnnot::Func { params, ret } => {
+        // TODO: can we do something about cloning here?
         let params = params.clone();
         let ret = *ret;
 

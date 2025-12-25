@@ -37,7 +37,7 @@ impl<'a> Ast<'a> {
     &self.annots[id.0 as usize].0
   }
 
-  fn get_ident(&self, id: IdentId) -> &str {
+  pub fn get_ident(&self, id: IdentId) -> &str {
     &self.idents.lookup(id)
   }
 
@@ -183,7 +183,13 @@ impl<'a> Ast<'a> {
         str.push_str(&format!("{:?}", ret.map(|id| self.dbg_annot(id))));
         str
       },
-      TyAnnot::UserDef { name, generics } => format!("UserDef: {} generics {:?}", self.get_ident(*name), generics),
+      TyAnnot::UserDef { name, generics } => {
+        let mut str = format!("UserDef: {} - ", self.get_ident(*name));
+        for generic in generics {
+          str.push_str(&format!("{}, ", self.dbg_annot(*generic)));
+        }
+        str
+      }
     }
   }
 

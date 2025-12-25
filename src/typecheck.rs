@@ -212,7 +212,6 @@ impl TypeEnv {
         // TODO: can we do something about the cloning?
         let name = *name;
         let mut fields = fields.clone();
-        let generics = generics.clone();
 
         for field in fields.iter_mut().map(|f| &mut f.1) {
           *field = self.instantiate_generic(*field, mapping)?;
@@ -504,7 +503,6 @@ impl Typechecker {
     } else {
       // untyped: take rhs type
       let rhs_ty = types.get(rhs_id);
-      println!("ASSIGNING: {:?}", rhs_ty);
 
       match rhs_ty {
         // generics cannot be assigned
@@ -553,6 +551,7 @@ impl Typechecker {
         StmtTopLvl::StructDecl { name, fields, generics } => {
           // check struct fields
 
+          // TODO: check for self referential structs
           let mut fields_ids = Vec::new();
           for field in fields {
             let ty = match self.annot_to_ty(ast, types, field.1) {
@@ -561,6 +560,8 @@ impl Typechecker {
             };
             fields_ids.push((field.0, ty));
           }
+
+
 
           // TODO: this will be duplicated
           let ty = Type::Struct { name: *name, fields: fields_ids, generics: generics.clone() };
