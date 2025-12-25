@@ -1,5 +1,5 @@
-use std::{collections::HashMap, iter::zip};
-use crate::{FrontendErrAlias, IdSize, ast::{Ast, IdentId}, lexer::Span, parser::{self, Expr, ExprId, ExprLiteral, Stmt, StmtId, StmtTopLvl, TyAnnot, TyAnnotId}};
+use std::{collections::{HashMap, HashSet}, iter::zip};
+use crate::{FrontendErrAlias, IdSize, ast::{Ast, IdentId, hash_obj}, lexer::Span, parser::{self, Expr, ExprId, ExprLiteral, Stmt, StmtId, StmtTopLvl, TyAnnot, TyAnnotId}};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
@@ -14,10 +14,6 @@ pub enum Type {
   Struct { name: IdentId, fields: Vec<(IdentId, TypeId)>, generics: Vec<IdentId> },
   
   Generic(IdentId),
-}
-
-impl Type {
-  pub fn size(&self) -> usize { todo!() }
 }
 
 pub mod ty_id {
@@ -35,12 +31,14 @@ pub struct TypeId(pub IdSize);
 
 pub struct TypeEnv {
   user_ident_to_id: HashMap<IdentId, TypeId>,
+  hash_to_index: HashMap<u64, TypeId>,
   pub types_pool: Vec<Type>,
 }
 impl Default for TypeEnv {
   fn default() -> Self {
     Self {
       user_ident_to_id: HashMap::new(),
+      hash_to_index: HashMap::new(),
       types_pool: vec![
         // Type::Untyped,
         Type::Void,
@@ -78,14 +76,27 @@ impl TypeEnv {
   pub fn add_userdef(&mut self, name: IdentId, ty: Type) -> Option<TypeId> {
     let id = self.add_ty(ty);
     match self.user_ident_to_id.insert(name, id) {
-      Some(old) => None,
+      Some(_old) => None,
       None => Some(id)
     }
   }
 
   pub fn add_ty(&mut self, ty: Type) -> TypeId {
+    let hash = hash_obj(&ty);
+
+    if let Some(id) = self.hash_to_index.get(&hash) {
+      return *id
+    }
+    
+    let id = TypeId(self.types_pool.len() as IdSize);
+    self.hash_to_index.insert(hash, id);
+
     self.types_pool.push(ty);
-    TypeId(self.types_pool.len() as IdSize - 1)
+    id
+
+    // let id = TypeId(self.types_pool.len() as IdSize);
+    // self.types_pool.push(ty);
+    // id
   }
 
   pub fn ty_eq(&self, a: TypeId, b: TypeId) -> bool {
@@ -207,7 +218,7 @@ impl TypeEnv {
           *field = self.instantiate_generic(*field, mapping)?;
         }
 
-        Type::Struct { name, fields, generics }
+        Type::Struct { name, fields, generics: Vec::new() }
       }
     };
 
@@ -252,6 +263,8 @@ pub struct Typechecker {
   binds: Bindings,
 }
 
+type CheckError<T> = Result<T, FrontendErrAlias>;
+
 impl Typechecker {
   fn err<S: Into<String>>(&self, ast: &Ast, msg: S, span: Span) -> FrontendErrAlias {
     let err = FrontendErrAlias::new(&ast.lexer, msg, span);
@@ -259,7 +272,7 @@ impl Typechecker {
     err
   }
 
-  pub fn scope<F: FnMut(&mut Self)>(&mut self, mut f: F) {
+  pub fn scope<F: FnMut(&mut Self) -> CheckError<()>>(&mut self, mut f: F) {
     let sp = self.binds.stack.len();
     f(self);
     self.binds.unwind(sp);
@@ -267,8 +280,8 @@ impl Typechecker {
 
   // TODO: this duplicates types
   // TODO: this can fail
-  pub fn annot_to_ty(&mut self, ast: &Ast, types: &mut TypeEnv, id: TyAnnotId) -> TypeId {
-    let (annot, _) = &ast.annots[id.0 as usize];
+  pub fn annot_to_ty(&self, ast: &Ast, types: &mut TypeEnv, id: TyAnnotId) -> CheckError<TypeId> {
+    let (annot, span) = &ast.annots[id.0 as usize];
     let id = match annot {
       TyAnnot::Bool => ty_id::BOOL,
       TyAnnot::Int => ty_id::INT,
@@ -277,20 +290,21 @@ impl Typechecker {
       TyAnnot::Generic(ident) => types.add_ty(Type::Generic(*ident)),
 
       TyAnnot::Array { inner, .. } => {
-        let inner_id = self.annot_to_ty(ast, types, *inner);
+        let inner_id = self.annot_to_ty(ast, types, *inner)?;
         // TODO: array len
         let ty = Type::Array { inner: inner_id, len: 0 };
         types.add_ty(ty)
       },
 
       TyAnnot::Func { params, ret } => {
-        let params_ids = params.iter()
-          .map(|param| self.annot_to_ty(ast, types, *param))
-          .collect();
+        let mut params_ids = Vec::new();
+        for param in params {
+          params_ids.push(self.annot_to_ty(ast, types, *param)?);
+        }
 
         let ret_id = ret
           .map(|id| self.annot_to_ty(ast, types, id))
-          .unwrap_or(ty_id::VOID);
+          .unwrap_or(Ok(ty_id::VOID))?;
 
         let ty = Type::Func { params: params_ids, ret: ret_id, is_generic: false };
         types.add_ty(ty)
@@ -301,18 +315,18 @@ impl Typechecker {
           Some((ty_id, ty)) => match ty {
             Type::Struct { name, fields, generics: gens } => {
               if concr.len() != gens.len() {
-                todo!("this is an error")
+                return Err(self.err(ast, "wrong generics count in annotation", *span))
               }
               
               let mut generics_map = HashMap::new();
-
               // TODO: can we do something about cloning here?
               for (g, c) in zip(gens.clone(), concr) {
-                let ann_ty = self.annot_to_ty(ast, types, *c);
+                let ann_ty = self.annot_to_ty(ast, types, *c)?;
                 generics_map.insert(g, ann_ty);
               }
 
-              types.instantiate_generic(ty_id, &generics_map).expect("handle wrong struct generic annotation")
+              types.instantiate_generic(ty_id, &generics_map)
+                .ok_or_else(|| self.err(ast, "handle wrong struct generic annotation", *span))?
             }
             _ => todo!("other userdefs not handled yet")
           }
@@ -321,10 +335,10 @@ impl Typechecker {
       },
     };
 
-    id
+    Ok(id)
   }
 
-  fn check_expr(&mut self, ast: &Ast, types: &mut TypeEnv, id: ExprId) -> Result<TypeId, FrontendErrAlias> {
+  fn check_expr(&self, ast: &Ast, types: &mut TypeEnv, id: ExprId) -> CheckError<TypeId> {
     let (expr, span) = &ast.exprs[id.0 as usize];
 
     let id = match expr {
@@ -434,7 +448,7 @@ impl Typechecker {
     Ok(id)
   }
 
-  fn check_stmt(&mut self, ast: &Ast, types: &mut TypeEnv, id: StmtId) -> Result<(), FrontendErrAlias> {
+  fn check_stmt(&mut self, ast: &Ast, types: &mut TypeEnv, id: StmtId) -> CheckError<()> {
     let (stmt, span) = &ast.stmts[id.0 as usize];
 
     match stmt {
@@ -476,12 +490,12 @@ impl Typechecker {
     concrete_struct = generic_struct MUST BE CHECKED
   */
 
-  fn check_decl(&mut self, ast: &Ast, types: &mut TypeEnv, decl: &parser::Decl, span: Span) -> Result<(), FrontendErrAlias> {
+  fn check_decl(&mut self, ast: &Ast, types: &mut TypeEnv, decl: &parser::Decl, span: Span) -> CheckError<()> {
     let rhs_id = self.check_expr(ast, types, decl.rhs)?;
     
     if let Some(annot) = decl.annot {
       // if we have the annotation, we do a ty equality
-      let decl_id = self.annot_to_ty(ast, types, annot);
+      let decl_id = self.annot_to_ty(ast, types, annot)?;
       if !types.ty_eq(decl_id, rhs_id) {
         return Err(self.err(ast, "different types provided in declaration", span));
       } else {
@@ -490,6 +504,7 @@ impl Typechecker {
     } else {
       // untyped: take rhs type
       let rhs_ty = types.get(rhs_id);
+      println!("ASSIGNING: {:?}", rhs_ty);
 
       match rhs_ty {
         // generics cannot be assigned
@@ -507,6 +522,8 @@ impl Typechecker {
       for id in stmts {
         _ = c.check_stmt(ast, types, *id);
       }
+
+      Ok(())
     });
 
     Ok(())
@@ -529,16 +546,21 @@ impl Typechecker {
     }
     
     // then add all declared functions signatures and check struct fields
-    for (stmt, _) in &ast.toplvl {
+    'traverse: for (stmt, _) in &ast.toplvl {
       match stmt {
         StmtTopLvl::Decl(_) => {}
         
         StmtTopLvl::StructDecl { name, fields, generics } => {
           // check struct fields
 
-          let fields_ids = fields.iter()
-          .map(|(ident, field)| (*ident, self.annot_to_ty(ast, types, *field)))
-          .collect();
+          let mut fields_ids = Vec::new();
+          for field in fields {
+            let ty = match self.annot_to_ty(ast, types, field.1) {
+              Ok(ty) => ty,
+              Err(e) => continue 'traverse, 
+            };
+            fields_ids.push((field.0, ty));
+          }
 
           // TODO: this will be duplicated
           let ty = Type::Struct { name: *name, fields: fields_ids, generics: generics.clone() };
@@ -546,13 +568,24 @@ impl Typechecker {
         },
 
         StmtTopLvl::FnDecl { name, params, ret, is_generic, .. } => {
-          let params_ids = params.iter()
-            .map(|(_, annot)| self.annot_to_ty(ast, types, *annot))
-            .collect();
+          let mut params_ids = Vec::new(); 
+          
+          for param in params {
+            let ty = match self.annot_to_ty(ast, types, param.1) {
+              Ok(ty) => ty,
+              Err(e) => continue 'traverse,
+            };
+            params_ids.push(ty);
+          }
 
           let ret_id = ret
             .map(|id| self.annot_to_ty(ast, types, id))
-            .unwrap_or(ty_id::VOID);
+            .unwrap_or(Ok(ty_id::VOID));
+
+          let ret_id = match ret_id {
+            Ok(ret) => ret,
+            Err(e) => continue 'traverse,
+          };
 
           let ty = Type::Func { params: params_ids, ret: ret_id, is_generic: *is_generic };
           let ty_id = types.add_ty(ty);
@@ -581,12 +614,12 @@ impl Typechecker {
           self.scope(|c| {
             for param in &params {
               // TODO: this is done twice!
-              let ty = c.annot_to_ty(ast, types, param.1);
-
+              let ty = c.annot_to_ty(ast, types, param.1)?;
               c.binds.add(param.0, ty);
             }
-
+            
             _ = c.check_stmt(ast, types, *block);
+            Ok(())
           });
         }
       }

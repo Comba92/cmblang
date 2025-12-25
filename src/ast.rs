@@ -1,6 +1,12 @@
 use std::{collections::HashMap, hash::{self, Hash, Hasher}};
 use crate::{IdSize, lexer::{Lexer, Span, Token}, parser::{Expr, ExprId, ExprLiteral, Spanned, Stmt, StmtId, StmtTopLvl, TokenId, TyAnnot, TyAnnotId}};
 
+pub fn hash_obj<T: Hash>(obj: &T) -> u64 {
+  let mut hasher = hash::DefaultHasher::new();
+  obj.hash(&mut hasher);
+  hasher.finish()
+}
+
 pub struct Ast<'a> {
   pub lexer: Lexer<'a>,
 
@@ -202,14 +208,10 @@ pub struct StringInterner{
 
 impl StringInterner {
   pub fn intern(&mut self, name: &str) -> IdentId {
-    let hash = {
-      let mut hasher = hash::DefaultHasher::new();
-      name.hash(&mut hasher);
-      hasher.finish()
-    };
+    let hash = hash_obj(&name);
 
     if let Some(id) = self.hash_to_index.get(&hash) {
-      return (*id).into();
+      return *id;
     }
 
     let id = IdentId(self.hash_to_index.len() as IdSize);

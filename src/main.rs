@@ -84,9 +84,10 @@ fn main() {
   
   println!();
 
+  // ast.dbg_exprs();
+  // ast.dbg_stmts();
+  // ast.dbg_toplvls();
+  
   ast.dbg_idents();
-  ast.dbg_exprs();
-  ast.dbg_stmts();
-  ast.dbg_toplvls();
   ast.dbg_annots();
 }

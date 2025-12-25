@@ -1,4 +1,4 @@
-use std::{collections::{HashMap, HashSet}, hash::Hash};
+use std::{collections::HashSet, hash::Hash};
 
 use crate::{CursorIter, FrontendErrAlias, IdSize, ast::{Ast, IdentId, StringInterner}, lexer::{self, KeywordKind, Lexer, Span, Token, TokenKind}}; 
 
@@ -28,7 +28,7 @@ pub enum Expr {
   Unary { op: TokenId, rhs: ExprId },
   Binary { op: TokenId, lhs: ExprId, rhs: ExprId },
   Call { callee: ExprId, args: Vec<ExprId> },
-  Member { lhs: ExprId, field: TokenId },
+  Member { lhs: ExprId, field: IdentId },
   Index { lhs: ExprId, idx: ExprId },
 }
 
@@ -314,7 +314,10 @@ impl<'a> Parser<'a> {
             
             self.push_expr(Expr::Call { callee: lhs, args }, op.span)
           },
-          TokenKind::Dot => todo!("member access"),
+          TokenKind::Dot => {
+            let rhs = self.expect_ident("expect member idientifier after . operation")?;
+            self.push_expr(Expr::Member { lhs, field: rhs }, op.span)
+          },
           TokenKind::BraceL => todo!("array indexing"),
           _ => return Result::Err(self.err("invalid postfix expression", t)),
         };
@@ -411,41 +414,12 @@ impl<'a> Parser<'a> {
     Ok(self.push_annot(annot, t.span))
   }
 
-  // fn parse_decl(&mut self, name: Token, constant: bool) -> ParseResult<(Decl, Span)> {
-  //   let ident = self.push_ident(name.clone());
-
-  //   // // eat ':'
-  //   // self.cursor.advance();
-
-  //   let ty_id = if self.cursor.peek().kind == TokenKind::Assign {
-  //     self.cursor.advance();
-  //     ty_id::UNTYPED
-  //   } else if self.cursor.peek().kind == TokenKind::Colon {
-  //     self.cursor.advance();
-  //     let id = self.parse_annot()?;
-
-  //     // eat '='
-  //     self.expect(TokenKind::Assign, "expect '=' after type annotation")?;
-  //     id
-  //   } else {
-  //     return Err(self.err("Expect ':' or '=' after declaration name", name))
-  //   };
-    
-  //   let rhs = self.parse_expr(0)?;
-  //   let decl = Decl { ident, annot: ty_id, rhs, constant };
-  //   Ok((decl, name.span))
-  // }
-
   fn parse_decl(&mut self, name: Token, constant: bool) -> ParseResult<(Decl, Span)> {
     let ident = self.push_ident(name.clone());
-
-    // // eat ':'
-    // self.cursor.advance();
 
     let t = self.cursor.peek();
     let annot = if t.kind == TokenKind::Assign {
       self.cursor.advance();
-      // self.push_annot(TyAnnot::Untyped, t.span)
       None
     } else if self.cursor.peek().kind == TokenKind::Colon {
       self.cursor.advance();
@@ -595,7 +569,6 @@ impl<'a> Parser<'a> {
     };
 
     let block = self.parse_block()?;
-    // TODO: if there were any generics, this block could have generics as annotations; if not resolved they will stay userdefs
 
     Ok(self.push_toplvl(StmtTopLvl::FnDecl { name: ident, params, ret, block, is_generic }, t.span))
   }

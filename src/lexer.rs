@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::LazyLock};
 use strum::IntoEnumIterator;
-use crate::{CursorIter, FrontendErr, IdSize};
+use crate::{CursorIter, FrontendErr};
 
 static KEYWORDS: LazyLock<HashMap<String, KeywordKind>> = LazyLock::new(|| {
   let mut map = HashMap::new();
