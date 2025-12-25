@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt, hash::{self, Hash, Hasher}};
+use std::{collections::HashMap, hash::{self, Hash, Hasher}};
 use crate::{IdSize, lexer::{Lexer, Span, Token}, parser::{Expr, ExprId, ExprLiteral, Spanned, Stmt, StmtId, StmtTopLvl, TokenId, TyAnnot, TyAnnotId}};
 
 pub struct Ast<'a> {
@@ -60,7 +60,14 @@ impl<'a> Ast<'a> {
           str.push(']');
           str
         },
-        ExprLiteral::Struct(ident, expr_ids) => todo!(),
+        ExprLiteral::Struct(ident, expr_ids) => {
+          let mut str = format!("Struct lit {}: {{", self.get_ident(*ident));
+          for id in expr_ids {
+            str.push_str(&format!("{:?}, ", self.dbg_expr(*id)))
+          }
+          str.push('}');
+          str
+        },
       },
       Expr::Variable(id) => format!("Variable: {:?}", self.get_ident(*id)),
       Expr::Unary { op, rhs } => format!("Unary: {:?} {}", self.get_token(*op), self.dbg_expr(id)),
@@ -105,6 +112,7 @@ impl<'a> Ast<'a> {
       Stmt::IfElse { cond, iblock, eblock } => todo!(),
       Stmt::While { cond, wblock } => todo!(),
       Stmt::Return(expr_id) => todo!(),
+      
       Stmt::Expr(id) => self.dbg_expr(*id),
     }
   }
@@ -132,7 +140,14 @@ impl<'a> Ast<'a> {
         str.push_str(&self.dbg_stmt(*block));
         str
       },
-      StmtTopLvl::StructDecl { name, fields } => todo!(),
+      StmtTopLvl::StructDecl { name, fields, is_generic } => {
+        let mut str = format!("Struct {}: {{", self.get_ident(*name));
+        for field in fields {
+          str.push_str(&format!("{}: {}, ", self.get_ident(field.0), self.dbg_annot(field.1)));
+        }
+        str.push('}');
+        str
+      },
     }
   }
 

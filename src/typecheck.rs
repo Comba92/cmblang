@@ -11,7 +11,7 @@ pub enum Type {
   Array { inner: TypeId, len: u32 },
   
   Func { params: Vec<TypeId>, ret: TypeId, is_generic: bool },
-  Struct { name: IdentId, fields: Vec<(IdentId, TypeId)> },
+  Struct { name: IdentId, fields: Vec<(IdentId, TypeId)>, is_generic: bool },
   
   Generic(IdentId),
 }
@@ -56,16 +56,18 @@ impl Default for TypeEnv {
 }
 
 impl TypeEnv {
-  pub fn lookup_id(&self, id: IdentId) -> TypeId {
-    self.user_ident_to_id[&id]
+  pub fn lookup_id(&self, id: IdentId) -> Option<TypeId> {
+    self.user_ident_to_id.get(&id).copied()
   }
 
-  pub fn lookup_ty(&self, id: IdentId) -> &Type {
-    &self.types_pool[self.lookup_id(id).0 as usize]
+  pub fn lookup_ty(&self, id: IdentId) -> Option<&Type> {
+    self.user_ident_to_id.get(&id)
+      .map(|id| &self.types_pool[id.0 as usize])
   }
 
-  pub fn lookup_ty_mut(&mut self, id: IdentId) -> &mut Type {
-    &mut self.types_pool[self.user_ident_to_id[&id].0 as usize]
+  pub fn lookup_ty_mut(&mut self, id: IdentId) -> Option<&mut Type> {
+    self.user_ident_to_id.get(&id)
+      .map(|id| &mut self.types_pool[id.0 as usize])
   }
 
   pub fn get(&self, id: TypeId) -> &Type {
@@ -106,7 +108,9 @@ impl TypeEnv {
         ra == rb && pa.len() == pb.len() && zip(pa, pb).all(|(ta, tb)| self.ty_eq(*ta, *tb))
       }
 
-      (Type::Struct { name: na, fields: fa }, Type::Struct { name: nb, fields: fb }) => todo!(),
+      (Type::Struct { name: na, fields: fa, is_generic: a_is_gen }, Type::Struct { name: nb, fields: fb, is_generic: b_is_gen }) => {
+        na == nb && fa.len() == fb.len() && zip(fa, fb).all(|(ta, tb)| self.ty_eq(ta.1, tb.1))
+      },
 
       _ => false,
     }
@@ -151,7 +155,16 @@ impl TypeEnv {
         gen_id
       }
 
-      (Type::Struct { name: na, fields: fa }, Type::Struct { name: nb, fields: fb }) => todo!(),
+      (Type::Struct { name: na, fields: fa, is_generic: a_is_gen }, Type::Struct { name: nb, fields: fb, is_generic: b_is_gen }) => {
+        if na != nb { return None }
+        if fa.len() != fb.len() { return None }
+
+        for field in zip(fa, fb).map(|(ta, tb)| (ta.1, tb.1)) {
+          self.generic_eq(field.0, field.1, mapping)?;
+        }
+
+        gen_id
+      },
 
       _ => return None,
     };
@@ -159,37 +172,49 @@ impl TypeEnv {
     Some(id)
   }
 
-  fn instantiate_generic(&mut self, id: TypeId, mapping: &HashMap<IdentId, TypeId>) -> TypeId {
+  fn instantiate_generic(&mut self, id: TypeId, mapping: &HashMap<IdentId, TypeId>) -> Option<TypeId> {
     let ty = self.get(id);
     let new = match ty {
       Type::Generic(ident) => {
-        let conc_id = mapping.get(ident).unwrap();
-        return *conc_id
+        let conc_id = mapping.get(ident)?;
+        return Some(*conc_id)
       },
 
       Type::Void | Type::Bool | Type::Int | Type::Float => ty.clone(),
       Type::Array { inner, len } => {
         let inner = *inner;
         let len = *len;
-        Type::Array { inner: self.instantiate_generic(inner, mapping), len }
+        Type::Array { inner: self.instantiate_generic(inner, mapping)?, len }
       }
       Type::Func { params, ret, is_generic } => {
-        if !is_generic { return id }
+        if !is_generic { return Some(id) }
 
         let mut ret = *ret;
         let mut params = params.clone();
         for param in &mut params {
-          *param = self.instantiate_generic(*param, mapping);
+          *param = self.instantiate_generic(*param, mapping)?;
         }
-        ret = self.instantiate_generic(ret, mapping);
+        ret = self.instantiate_generic(ret, mapping)?;
 
         Type::Func { params, ret, is_generic: false }
       }
 
-      Type::Struct { name, fields } => todo!()
+      Type::Struct { name, fields, is_generic } => {
+        if !is_generic { return Some(id) }
+
+        let name = *name;
+        let mut fields = fields.clone();
+
+        for field in fields.iter_mut().map(|f| &mut f.1) {
+          *field = self.instantiate_generic(*field, mapping)?;
+        }
+
+        Type::Struct { name, fields, is_generic: false }
+      }
     };
 
-    self.add_ty(new)
+    // TODO: this will duplicate types
+    Some(self.add_ty(new))
   }
 }
 
@@ -242,6 +267,8 @@ impl Typechecker {
     self.binds.unwind(sp);
   }
 
+  // TODO: this duplicates types
+  // TODO: this can fail
   pub fn annot_to_ty(&mut self, ast: &Ast, types: &mut TypeEnv, id: TyAnnotId) -> TypeId {
     let (annot, _) = &ast.annots[id.0 as usize];
     let id = match annot {
@@ -271,7 +298,12 @@ impl Typechecker {
         types.add_ty(ty)
       },
       
-      TyAnnot::UserDef { name, generics } => todo!(),
+      TyAnnot::UserDef { name, generics } => {
+        match types.lookup_id(*name) {
+          Some(ty) => ty,
+          None => todo!("undeclared types not handled yet")
+        }
+      },
     };
 
     id
@@ -286,7 +318,51 @@ impl Typechecker {
         ExprLiteral::Int(_) => ty_id::INT,
         ExprLiteral::Float(_) => ty_id::FLOAT,
         ExprLiteral::Array(expr_ids) => todo!(),
-        ExprLiteral::Struct(ident_id, expr_ids) => todo!(),
+        ExprLiteral::Struct(ident, members) => {
+          let struct_ty = types.lookup_ty(*ident)
+            .ok_or_else(|| self.err(ast, "undeclared struct name", *span))?;
+          match struct_ty {
+            Type::Struct { name, fields, is_generic } => {
+              if fields.len() != members.len() {
+                return Err(self.err(ast, "wrong fields count in struct literal", *span))
+              }
+
+              // TODO: can we do something about the cloning here?
+              let name = *name;
+              let fields = fields.clone();
+              let is_generic = *is_generic;
+
+              if is_generic {
+                let mut generics_map= HashMap::new();
+
+                for ((_, field_ty), member) in zip(fields, members) {
+                  let member_ty = self.check_expr(ast, types, *member)?;
+
+                  types.generic_eq(field_ty, member_ty, &mut generics_map)
+                    .ok_or_else(|| self.err(ast, "impossible to instantiate generic struct", *span))?;
+                }
+
+                // we can do unwrap here as we know the struct is present
+                let struct_id = types.lookup_id(name).unwrap();
+                let instance_id = types.instantiate_generic(struct_id, &generics_map)
+                  .ok_or_else(|| self.err(ast, "impossible to instantiate generic struct", *span))?;
+
+                instance_id
+              } else {
+                for ((_, field_ty), member) in zip(fields, members){
+                  let member_ty = self.check_expr(ast, types, *member)?;
+                  if !types.ty_eq(field_ty, member_ty) {
+                    return Err(self.err(ast, "invalid members in struct literal", *span))
+                  }
+                }
+
+                types.lookup_id(name).unwrap()
+              }
+            }
+
+            _ => return Err(self.err(ast, "wrong name type for struct literal", *span))
+          }
+        },
       }
 
       Expr::Variable(ident) => self.binds.get(*ident)
@@ -304,7 +380,6 @@ impl Typechecker {
             if params.len() != args.len() {
               return Err(self.err(ast, "wrong arguments count in function call", *span))
             }
-            // TODO: has type to be instantiated as global?
 
             // TODO: can we do something about the cloning here?
             let params = params.clone();
@@ -320,8 +395,10 @@ impl Typechecker {
                   .ok_or_else(|| self.err(ast, "impossible to instantiate generic function", *span))?;
               }
   
+              let instance_id = types.instantiate_generic(callee_id, &generics_map)
+              .ok_or_else(|| self.err(ast, "impossible to infer function return type", *span))?;
+            
               // TODO: little hack for now...
-              let instance_id = types.instantiate_generic(callee_id, &generics_map);
               let Type::Func { ret, .. } = types.get(instance_id) else { unreachable!() };
               *ret
             } else {
@@ -406,6 +483,7 @@ impl Typechecker {
       match rhs_ty {
         // generics cannot be assigned
         Type::Func { is_generic, .. } if *is_generic => return Err(self.err(ast, "can't assign generic function", span)),
+        Type::Struct { is_generic, .. } if *is_generic => return Err(self.err(ast, "can't assign generic struct", span)),
         _ => { self.binds.add(decl.ident, rhs_id); }
       }
     }
@@ -416,7 +494,7 @@ impl Typechecker {
   fn check_block(&mut self, ast: &Ast, types: &mut TypeEnv, stmts: &[StmtId]) -> Result<(), FrontendErrAlias> {
     self.scope(|c| {
       for id in stmts {
-        c.check_stmt(ast, types, *id);
+        _ = c.check_stmt(ast, types, *id);
       }
     });
 
@@ -428,11 +506,9 @@ impl Typechecker {
     for (stmt, span) in &ast.toplvl {
       match stmt {
         StmtTopLvl::Decl(_) | StmtTopLvl::FnDecl {..} => {},
-        StmtTopLvl::StructDecl { name, .. } => {
-          // TODO: not sure if parser should return hashmap
-
+        StmtTopLvl::StructDecl { name, is_generic, .. } => {
           // only add the name to the types, do not parse fields yet
-          let ty = Type::Struct { name: *name, fields: Vec::new() };
+          let ty = Type::Struct { name: *name, fields: Vec::new(), is_generic: *is_generic };
           match types.add_userdef(*name, ty) {
             Some(_) => {}
             None => { self.err(ast, "already declared struct", *span); }
@@ -440,21 +516,21 @@ impl Typechecker {
         },
       }
     }
-
     
     // then add all declared functions signatures and check struct fields
     for (stmt, _) in &ast.toplvl {
       match stmt {
         StmtTopLvl::Decl(_) => {}
         
-        StmtTopLvl::StructDecl { name, fields } => {
+        StmtTopLvl::StructDecl { name, fields, is_generic } => {
           // check struct fields
 
           let fields_ids = fields.iter()
           .map(|(ident, field)| (*ident, self.annot_to_ty(ast, types, *field)))
           .collect();
 
-          let ty = Type::Struct { name: *name, fields: fields_ids };
+          // TODO: this will be duplicated
+          let ty = Type::Struct { name: *name, fields: fields_ids, is_generic: *is_generic };
           types.add_userdef(*name, ty);
         },
 
