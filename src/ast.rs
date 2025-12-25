@@ -140,7 +140,7 @@ impl<'a> Ast<'a> {
         str.push_str(&self.dbg_stmt(*block));
         str
       },
-      StmtTopLvl::StructDecl { name, fields, is_generic } => {
+      StmtTopLvl::StructDecl { name, fields, generics } => {
         let mut str = format!("Struct {}: {{", self.get_ident(*name));
         for field in fields {
           str.push_str(&format!("{}: {}, ", self.get_ident(field.0), self.dbg_annot(field.1)));
@@ -177,7 +177,7 @@ impl<'a> Ast<'a> {
         str.push_str(&format!("{:?}", ret.map(|id| self.dbg_annot(id))));
         str
       },
-      TyAnnot::UserDef { name, generics } => format!("Array: {} {:?}", self.get_ident(*name), generics),
+      TyAnnot::UserDef { name, generics } => format!("UserDef: {} generics {:?}", self.get_ident(*name), generics),
     }
   }
 

@@ -91,7 +91,7 @@ pub enum StmtTopLvl {
   Decl(Decl),
   // we can split this into two enums
   FnDecl { name: IdentId, params: Vec<(IdentId, TyAnnotId)>, ret: Option<TyAnnotId>, block: StmtId, is_generic: bool },
-  StructDecl { name: IdentId, fields: Vec<(IdentId, TyAnnotId)>, is_generic: bool },
+  StructDecl { name: IdentId, fields: Vec<(IdentId, TyAnnotId)>, generics: Vec<IdentId> },
 }
 
 #[derive(Debug)]
@@ -612,9 +612,9 @@ impl<'a> Parser<'a> {
         TokenKind::Great,
         "unclosed generic listing",
         "repeated generic parameter"
-      )?.1
+      )?
     } else {
-      HashSet::new()
+      (Vec::new(), HashSet::new())
     };
 
     self.expect(TokenKind::CurlyL, "expect '{' after struct name")?;
@@ -633,16 +633,13 @@ impl<'a> Parser<'a> {
       "repeated struct field name",
     )?.0;
 
-    let is_generic = if !generics.is_empty() {
+    if !generics.1.is_empty() {
       for (_, field_ty) in &fields {
-        self.resolve_generics(*field_ty, &generics)?;
+        self.resolve_generics(*field_ty, &generics.1)?;
       }
-      true
-    } else {
-      false
-    };
+    }
 
-    Ok(self.push_toplvl(StmtTopLvl::StructDecl { name, fields, is_generic }, t.span))
+    Ok(self.push_toplvl(StmtTopLvl::StructDecl { name, fields, generics: generics.0 }, t.span))
   }
 
   fn parse_block(&mut self) -> ParseResult<StmtId> {

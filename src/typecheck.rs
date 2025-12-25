@@ -11,7 +11,7 @@ pub enum Type {
   Array { inner: TypeId, len: u32 },
   
   Func { params: Vec<TypeId>, ret: TypeId, is_generic: bool },
-  Struct { name: IdentId, fields: Vec<(IdentId, TypeId)>, is_generic: bool },
+  Struct { name: IdentId, fields: Vec<(IdentId, TypeId)>, generics: Vec<IdentId> },
   
   Generic(IdentId),
 }
@@ -56,18 +56,14 @@ impl Default for TypeEnv {
 }
 
 impl TypeEnv {
-  pub fn lookup_id(&self, id: IdentId) -> Option<TypeId> {
-    self.user_ident_to_id.get(&id).copied()
+  pub fn lookup_ty(&self, id: IdentId) -> Option<(TypeId, &Type)> {
+    self.user_ident_to_id.get(&id)
+      .map(|id| (*id, &self.types_pool[id.0 as usize]))
   }
 
-  pub fn lookup_ty(&self, id: IdentId) -> Option<&Type> {
+  pub fn lookup_ty_mut(&mut self, id: IdentId) -> Option<(TypeId, &mut Type)> {
     self.user_ident_to_id.get(&id)
-      .map(|id| &self.types_pool[id.0 as usize])
-  }
-
-  pub fn lookup_ty_mut(&mut self, id: IdentId) -> Option<&mut Type> {
-    self.user_ident_to_id.get(&id)
-      .map(|id| &mut self.types_pool[id.0 as usize])
+      .map(|id| (*id, &mut self.types_pool[id.0 as usize]))
   }
 
   pub fn get(&self, id: TypeId) -> &Type {
@@ -108,7 +104,7 @@ impl TypeEnv {
         ra == rb && pa.len() == pb.len() && zip(pa, pb).all(|(ta, tb)| self.ty_eq(*ta, *tb))
       }
 
-      (Type::Struct { name: na, fields: fa, is_generic: a_is_gen }, Type::Struct { name: nb, fields: fb, is_generic: b_is_gen }) => {
+      (Type::Struct { name: na, fields: fa, generics: gena }, Type::Struct { name: nb, fields: fb, generics: genb }) => {
         na == nb && fa.len() == fb.len() && zip(fa, fb).all(|(ta, tb)| self.ty_eq(ta.1, tb.1))
       },
 
@@ -155,7 +151,7 @@ impl TypeEnv {
         gen_id
       }
 
-      (Type::Struct { name: na, fields: fa, is_generic: a_is_gen }, Type::Struct { name: nb, fields: fb, is_generic: b_is_gen }) => {
+      (Type::Struct { name: na, fields: fa, generics: gena }, Type::Struct { name: nb, fields: fb, generics: genb }) => {
         if na != nb { return None }
         if fa.len() != fb.len() { return None }
 
@@ -199,17 +195,19 @@ impl TypeEnv {
         Type::Func { params, ret, is_generic: false }
       }
 
-      Type::Struct { name, fields, is_generic } => {
-        if !is_generic { return Some(id) }
+      Type::Struct { name, fields, generics } => {
+        if generics.is_empty() { return Some(id) }
 
+        // TODO: can we do something about the cloning?
         let name = *name;
         let mut fields = fields.clone();
+        let generics = generics.clone();
 
         for field in fields.iter_mut().map(|f| &mut f.1) {
           *field = self.instantiate_generic(*field, mapping)?;
         }
 
-        Type::Struct { name, fields, is_generic: false }
+        Type::Struct { name, fields, generics }
       }
     };
 
@@ -298,10 +296,27 @@ impl Typechecker {
         types.add_ty(ty)
       },
       
-      TyAnnot::UserDef { name, generics } => {
-        match types.lookup_id(*name) {
-          Some(ty) => ty,
-          None => todo!("undeclared types not handled yet")
+      TyAnnot::UserDef { name, generics: concr } => {
+        match types.lookup_ty(*name) {
+          Some((ty_id, ty)) => match ty {
+            Type::Struct { name, fields, generics: gens } => {
+              if concr.len() != gens.len() {
+                todo!("this is an error")
+              }
+              
+              let mut generics_map = HashMap::new();
+
+              // TODO: can we do something about cloning here?
+              for (g, c) in zip(gens.clone(), concr) {
+                let ann_ty = self.annot_to_ty(ast, types, *c);
+                generics_map.insert(g, ann_ty);
+              }
+
+              types.instantiate_generic(ty_id, &generics_map).expect("handle wrong struct generic annotation")
+            }
+            _ => todo!("other userdefs not handled yet")
+          }
+          None => todo!("undeclared types not handled yet"),
         }
       },
     };
@@ -319,20 +334,18 @@ impl Typechecker {
         ExprLiteral::Float(_) => ty_id::FLOAT,
         ExprLiteral::Array(expr_ids) => todo!(),
         ExprLiteral::Struct(ident, members) => {
-          let struct_ty = types.lookup_ty(*ident)
+          let (struct_id, struct_ty) = types.lookup_ty(*ident)
             .ok_or_else(|| self.err(ast, "undeclared struct name", *span))?;
           match struct_ty {
-            Type::Struct { name, fields, is_generic } => {
+            Type::Struct { name, fields, generics } => {
               if fields.len() != members.len() {
                 return Err(self.err(ast, "wrong fields count in struct literal", *span))
               }
 
               // TODO: can we do something about the cloning here?
-              let name = *name;
               let fields = fields.clone();
-              let is_generic = *is_generic;
 
-              if is_generic {
+              if !generics.is_empty() {
                 let mut generics_map= HashMap::new();
 
                 for ((_, field_ty), member) in zip(fields, members) {
@@ -342,8 +355,6 @@ impl Typechecker {
                     .ok_or_else(|| self.err(ast, "impossible to instantiate generic struct", *span))?;
                 }
 
-                // we can do unwrap here as we know the struct is present
-                let struct_id = types.lookup_id(name).unwrap();
                 let instance_id = types.instantiate_generic(struct_id, &generics_map)
                   .ok_or_else(|| self.err(ast, "impossible to instantiate generic struct", *span))?;
 
@@ -356,7 +367,7 @@ impl Typechecker {
                   }
                 }
 
-                types.lookup_id(name).unwrap()
+                struct_id
               }
             }
 
@@ -483,7 +494,7 @@ impl Typechecker {
       match rhs_ty {
         // generics cannot be assigned
         Type::Func { is_generic, .. } if *is_generic => return Err(self.err(ast, "can't assign generic function", span)),
-        Type::Struct { is_generic, .. } if *is_generic => return Err(self.err(ast, "can't assign generic struct", span)),
+        Type::Struct { generics, .. } if !generics.is_empty() => return Err(self.err(ast, "can't assign generic struct", span)),
         _ => { self.binds.add(decl.ident, rhs_id); }
       }
     }
@@ -506,9 +517,9 @@ impl Typechecker {
     for (stmt, span) in &ast.toplvl {
       match stmt {
         StmtTopLvl::Decl(_) | StmtTopLvl::FnDecl {..} => {},
-        StmtTopLvl::StructDecl { name, is_generic, .. } => {
+        StmtTopLvl::StructDecl { name, generics, .. } => {
           // only add the name to the types, do not parse fields yet
-          let ty = Type::Struct { name: *name, fields: Vec::new(), is_generic: *is_generic };
+          let ty = Type::Struct { name: *name, fields: Vec::new(), generics: generics.clone() };
           match types.add_userdef(*name, ty) {
             Some(_) => {}
             None => { self.err(ast, "already declared struct", *span); }
@@ -522,7 +533,7 @@ impl Typechecker {
       match stmt {
         StmtTopLvl::Decl(_) => {}
         
-        StmtTopLvl::StructDecl { name, fields, is_generic } => {
+        StmtTopLvl::StructDecl { name, fields, generics } => {
           // check struct fields
 
           let fields_ids = fields.iter()
@@ -530,7 +541,7 @@ impl Typechecker {
           .collect();
 
           // TODO: this will be duplicated
-          let ty = Type::Struct { name: *name, fields: fields_ids, is_generic: *is_generic };
+          let ty = Type::Struct { name: *name, fields: fields_ids, generics: generics.clone() };
           types.add_userdef(*name, ty);
         },
 
