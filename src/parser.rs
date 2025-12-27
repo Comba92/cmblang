@@ -318,7 +318,11 @@ impl<'a> Parser<'a> {
             let rhs = self.expect_ident("expect member idientifier after . operation")?;
             self.push_expr(Expr::Member { lhs, field: rhs }, op.span)
           },
-          TokenKind::BraceL => todo!("array indexing"),
+          TokenKind::BraceL => {
+            let rhs = self.parse_expr(0)?;
+            self.expect(TokenKind::BraceR, "unclosed array indexing bracket")?;
+            self.push_expr(Expr::Index { lhs, idx: rhs }, op.span)
+          }
           _ => return Result::Err(self.err("invalid postfix expression", t)),
         };
 
@@ -468,13 +472,14 @@ impl<'a> Parser<'a> {
     Ok(stmt)
   }
 
+  // TODO: this can probably be optimized by doing something similiar to parse_block_with_generics() function
   fn resolve_generics(&mut self, id: TyAnnotId, generics_set: &HashSet<IdentId>) -> ParseResult<()> {
     let (annot, span) = &mut self.annots[id.0 as usize];
 
     match annot {
       TyAnnot::UserDef { name, generics } => {
           if generics_set.contains(name) {
-            // it is a generic
+            // it is a basic generic
 
             if !generics.is_empty() {
               return Err(FrontendErrAlias::new(
@@ -487,6 +492,7 @@ impl<'a> Parser<'a> {
             // edit the annotation from UserDef to Generic
             *annot = TyAnnot::Generic(*name);
           } else {
+            // it is a userdef with some generic listing
             // TODO: can we do something about cloning here?
             for generic in generics.clone() {
               self.resolve_generics(generic, generics_set)?;
@@ -494,7 +500,7 @@ impl<'a> Parser<'a> {
           }
         }
 
-      TyAnnot::Generic(_) => unreachable!("shouldn't find generics during function generic resoltion"),
+      TyAnnot::Generic(_) => unreachable!("shouldn't find generics during function generic resolution"),
 
       // not a generic
       TyAnnot::Bool | TyAnnot::Int | TyAnnot::Float => {},
@@ -574,7 +580,8 @@ impl<'a> Parser<'a> {
       false
     };
 
-    let block = self.parse_block()?;
+    // let block = self.parse_block()?;
+    let block = self.parse_block_with_generics(&generics)?;
 
     Ok(self.push_toplvl(StmtTopLvl::FnDecl { name: ident, params, ret, block, is_generic }, t.span))
   }
@@ -637,6 +644,43 @@ impl<'a> Parser<'a> {
     }
 
     return Err(self.err("unclosed block", t))
+  }
+
+  fn parse_block_with_generics(&mut self, generics_set: &HashSet<IdentId>) -> ParseResult<StmtId> {
+    // this is hacky: we store the last type we've pushed;
+    // parse the block normally;
+    // then check every newly added type and if it is an userdef,
+    // we check if it is a generic and eventually convert it
+
+    let top = self.annots.len();
+    let block = self.parse_block()?;
+
+    for id in top..self.annots.len() {
+      let (annot, span) = &mut self.annots[id];
+
+      match annot {
+        TyAnnot::UserDef { name, generics } => {
+          if generics_set.contains(name) {
+            // it is a basic generic
+
+            if !generics.is_empty() {
+              return Err(FrontendErrAlias::new(
+                &self.cursor.lexer, 
+                "generic type can't have a generics list",
+                *span
+              ))
+            }
+
+            // edit the annotation from UserDef to Generic
+            *annot = TyAnnot::Generic(*name);
+          }
+        }
+
+        _ => {}
+      }
+    }
+
+    Ok(block)
   }
 
   fn parse_ifelse(&mut self) -> ParseResult<StmtId> {

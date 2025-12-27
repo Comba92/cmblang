@@ -17,23 +17,23 @@ pub struct Ast<'a> {
   pub idents: StringInterner,
 }
 impl<'a> Ast<'a> {
-  fn get_token(&self, id: TokenId) -> &Token {
+  pub fn get_token(&self, id: TokenId) -> &Token {
     &self.lexer.tokens[id.0 as usize]
   }
 
-  fn get_expr(&self, id: ExprId) -> &Expr {
+  pub fn get_expr(&self, id: ExprId) -> &Expr {
     &self.exprs[id.0 as usize].0
   }
 
-  fn get_stmt(&self, id: StmtId) -> &Stmt {
+  pub fn get_stmt(&self, id: StmtId) -> &Stmt {
     &self.stmts[id.0 as usize].0
   }
 
-  fn get_toplvl(&self, id: StmtId) -> &StmtTopLvl {
+  pub fn get_toplvl(&self, id: StmtId) -> &StmtTopLvl {
     &self.toplvl[id.0 as usize].0
   }
 
-  fn get_annot(&self, id: TyAnnotId) -> &TyAnnot {
+  pub fn get_annot(&self, id: TyAnnotId) -> &TyAnnot {
     &self.annots[id.0 as usize].0
   }
 

@@ -3,7 +3,7 @@ use std::{error, fmt};
 mod lexer;
 mod parser;
 mod ast;
-mod typecheck;
+mod checker;
 
 pub type FrontendErrAlias = FrontendErr;
 pub type IdSize = u32;
@@ -80,13 +80,13 @@ fn main() {
   let src = include_str!("../test2.cmb");
 
   let mut ast = parser::parse(src).unwrap();
-  let checker = typecheck::check(&mut ast);
+  let checker = checker::check(&mut ast);
   
   println!();
 
   // ast.dbg_exprs();
   // ast.dbg_stmts();
-  // ast.dbg_toplvls();
+  ast.dbg_toplvls();
   
   ast.dbg_idents();
   ast.dbg_annots();

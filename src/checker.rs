@@ -1,4 +1,4 @@
-use std::{collections::{HashMap, HashSet}, iter::zip};
+use std::{collections::{HashMap, HashSet}, iter::zip, vec};
 use crate::{FrontendErrAlias, IdSize, ast::{Ast, IdentId, hash_obj}, lexer::Span, parser::{self, Expr, ExprId, ExprLiteral, Stmt, StmtId, StmtTopLvl, TyAnnot, TyAnnotId}};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -36,20 +36,28 @@ pub struct TypeEnv {
 }
 impl Default for TypeEnv {
   fn default() -> Self {
-    Self {
+    let primitives = vec![
+      // Type::Untyped,
+      Type::Void,
+
+      //////////
+      Type::Void,
+      Type::Bool,
+      Type::Int,
+      Type::Float,
+    ];
+
+    let mut res = Self {
       user_ident_to_id: HashMap::new(),
       hash_to_index: HashMap::new(),
-      types_pool: vec![
-        // Type::Untyped,
-        Type::Void,
+      types_pool: Vec::new(),
+    };
 
-        //////////
-        Type::Void,
-        Type::Bool,
-        Type::Int,
-        Type::Float,
-      ],
+    for ty in primitives {
+      res.add_ty(ty);
     }
+
+    res
   }
 }
 
@@ -278,7 +286,6 @@ impl Typechecker {
   }
 
   // TODO: this duplicates types
-  // TODO: this can fail
   pub fn annot_to_ty(&self, ast: &Ast, types: &mut TypeEnv, id: TyAnnotId) -> CheckError<TypeId> {
     let (annot, span) = &ast.annots[id.0 as usize];
     let id = match annot {
@@ -329,7 +336,7 @@ impl Typechecker {
             }
             _ => todo!("other userdefs not handled yet")
           }
-          None => todo!("undeclared types not handled yet"),
+          None => return Err(self.err(ast, "undefined type", *span))
         }
       },
     };
@@ -560,7 +567,6 @@ impl Typechecker {
             };
             fields_ids.push((field.0, ty));
           }
-
 
 
           // TODO: this will be duplicated
