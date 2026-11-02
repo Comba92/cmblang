@@ -156,7 +156,7 @@ impl fmt::Display for Token {
 }
 
 #[derive(Debug)]
-enum LexError {
+pub enum LexError {
     InputTooBig,
     UnclosedBlockComment(Position),
 }
@@ -179,7 +179,19 @@ impl Lexer {
 }
 
 impl Lexer {
-    pub fn line_and_column_from_offset(&self, offset: u32) -> Position {
+    pub fn token_pos(&self, tok: &Token) -> Positioned<TokenKind> {
+        (tok.kind, self.pos_from_tok(tok))
+    }
+
+    pub fn token_string(&self, tok: &Token) -> &str {
+        &self.input[tok.span.start as usize..tok.span.end as usize]
+    }
+
+    pub fn pos_from_tok(&self, tok: &Token) -> Position {
+        self.pos_from_offset(tok.span.start)
+    }
+
+    pub fn pos_from_offset(&self, offset: u32) -> Position {
         let line = match self.line_offsets.binary_search(&offset) {
             // token starts exactly at line, return as is
             Ok(idx) => idx,
@@ -190,13 +202,9 @@ impl Lexer {
 
         let column = (offset - self.line_offsets[line]) as usize;
         Position {
-            line: line as u32,
+            line: 1 + line as u32,
             col: column as u32,
         }
-    }
-
-    pub fn token_string(&self, tok: &Token) -> &str {
-        &self.input[tok.span.start as usize..tok.span.end as usize]
     }
 }
 
@@ -345,7 +353,7 @@ pub fn scan(input: String) -> Result<Lexer, LexError> {
                         }
 
                         if depth > 0 {
-                            let pos = lex.line_and_column_from_offset(start);
+                            let pos = lex.pos_from_offset(start);
                             return Err(LexError::UnclosedBlockComment(pos));
                         }
 

@@ -16,7 +16,6 @@ pub struct IdentId(pub Id);
 #[derive(Debug, Clone, Copy)]
 pub struct TyAnnotId(pub Id);
 
-pub type Spanned<T> = (T, Span);
 pub type List<T> = Box<[T]>;
 
 #[derive(Debug, Clone)]
@@ -128,38 +127,57 @@ pub enum Stmt {
 type ParseResult<T> = Result<T, ParseError>;
 
 #[derive(Debug)]
-pub struct ParseError {
-    msg: String,
-    expected: Option<TokenKind>,
-    src: Token,
+pub enum ListingKind {
+    Block,
+    TypeGenericsAnnot,
+    FuncParamsAnnot,
+    TupleAnnot,
+    FuncCallArgs,
+    StructFields,
 }
 
-// #[derive(Debug)]
-// pub enum ParseError {
-//     InvalidStmtInTopLevel,
-//     InvalidStmtInBlock,
-//     IntParseError(std::num::ParseIntError),
-//     FloatParseError(std::num::ParseFloatError),
-//     UnclosedParenthesis {
-//         start: Position,
-//         end: Position,
-//     },
-//     UnclosedListing {
-//         start: Position,
-//         end: Position,
-//         what: String,
-//     },
-//     MalformedExpression(Position),
-//     WrongToken {
-//         expected: TokenKind,
-//         actual: TokenKind,
-//         after: TokenKind,
-//     },
-// }
+#[derive(Debug)]
+pub enum ParseError {
+    WrongToken {
+        pos: Position,
+        expected: TokenKind,
+        actual: TokenKind,
+        after: String, // TODO: should be enum? or just a message?
+    },
 
+    InvalidStmtInTopLevel(Positioned<TokenKind>),
+    InvalidStmtInBlock(Positioned<TokenKind>),
+
+    IntParseError {
+        inner: std::num::ParseIntError,
+        pos: Position,
+    },
+    FloatParseError {
+        inner: std::num::ParseFloatError,
+        pos: Position,
+    },
+
+    UnclosedParenthesis {
+        kind: TokenKind,
+        start: Position,
+    },
+
+    UnclosedListing {
+        start: Position,
+        end: Position,
+        what: ListingKind,
+    },
+
+    MalformedExpression(Positioned<TokenKind>),
+    MalformedTypeAnnotation(Positioned<TokenKind>),
+
+    ReachedEof,
+}
+
+#[derive(Default)]
 pub struct Parser {
-    lex: Lexer,
     pub errors: Vec<ParseError>,
+
     pub idents: StringInterner,
     pub exprs: Vec<Expr>,
     pub stmts: Vec<Stmt>,
@@ -168,20 +186,8 @@ pub struct Parser {
 }
 
 impl Parser {
-    fn new(lex: Lexer) -> Self {
-        Self {
-            lex,
-            idents: StringInterner::default(),
-            errors: vec![],
-            exprs: vec![],
-            stmts: vec![],
-            toplvl_stmts: vec![],
-            types: vec![],
-        }
-    }
-
-    fn add_ident(&mut self, tok: &Token) -> IdentId {
-        IdentId(self.idents.add(self.lex.token_string(tok)))
+    fn add_ident(&mut self, c: &ParseCursor, tok: &Token) -> IdentId {
+        IdentId(self.idents.add(c.lex.token_string(tok)))
     }
 
     fn add_ty_annot(&mut self, ty: TyAnnot) -> TyAnnotId {
@@ -214,38 +220,18 @@ impl Parser {
         self.idents.get(ident.0)
     }
 
-    fn err<S: Into<String>>(&self, msg: S, tok: &Token) -> ParseError {
-        ParseError {
-            msg: msg.into(),
-            expected: None,
-            src: tok.clone(),
-        }
-    }
-
     fn report_error(&mut self, c: &mut ParseCursor, e: ParseError) {
-        let pos = self.lex.line_and_column_from_offset(e.src.span.start);
-        let msg = if let Some(target) = e.expected {
-            format!(
-                "expected '{}' token {}, got token '{}', at line {}:{}",
-                target, e.msg, e.src.kind, pos.line, pos.col
-            )
-        } else {
-            format!(
-                "{} at token '{}' at line {}:{}",
-                e.msg, e.src.kind, pos.line, pos.col
-            )
-        };
-
+        eprintln!("{e:?}");
         self.errors.push(e);
-        eprintln!("{msg}");
 
         const UNTIL: &[TokenKind] = &[TokenKind::Fn, TokenKind::Let, TokenKind::Struct];
         c.skip_while(|t| !UNTIL.contains(t));
+        println!("{}", c.peek())
     }
 
-    fn parse_ident(&mut self, c: &mut ParseCursor, msg: &str) -> ParseResult<IdentId> {
-        let ident_tok = c.expect(TokenKind::Ident, || msg)?;
-        Ok(self.add_ident(ident_tok))
+    fn parse_ident(&mut self, c: &mut ParseCursor, after: &str) -> ParseResult<IdentId> {
+        let ident_tok = c.expect(TokenKind::Ident, || after)?.clone();
+        Ok(self.add_ident(c, &ident_tok))
     }
 
     // https://matklad.github.io/2020/04/13/simple-but-powerful-pratt-parsing.html
@@ -286,64 +272,74 @@ impl Parser {
             Some(lvl)
         }
 
-        let tok = c.advance();
+        let tok = &c.advance().clone();
 
         use TokenKind::*;
-        let mut lhs = match tok.kind {
-            IntNumber => {
-                let num = self.lex.token_string(tok).parse().map_err(|_| {
-                    self.err("error while parsing integer number literal token", tok)
-                })?;
-                self.add_expr(Expr::IntLiteral(num))
-            }
+        let mut lhs =
+            match tok.kind {
+                IntNumber => {
+                    let num =
+                        c.lex
+                            .token_string(tok)
+                            .parse()
+                            .map_err(|e| ParseError::IntParseError {
+                                inner: e,
+                                pos: c.lex.pos_from_tok(tok),
+                            })?;
+                    self.add_expr(Expr::IntLiteral(num))
+                }
 
-            FloatNumber => {
-                let num =
-                    self.lex.token_string(tok).parse().map_err(|_| {
-                        self.err("error while parsing float number literal token", tok)
+                FloatNumber => {
+                    let num = c.lex.token_string(tok).parse().map_err(|e| {
+                        ParseError::FloatParseError {
+                            inner: e,
+                            pos: c.lex.pos_from_tok(tok),
+                        }
                     })?;
-                self.add_expr(Expr::FloatLiteral(num))
-            }
+                    self.add_expr(Expr::FloatLiteral(num))
+                }
 
-            True => self.add_expr(Expr::BoolLiteral(true)),
-            False => self.add_expr(Expr::BoolLiteral(false)),
+                True => self.add_expr(Expr::BoolLiteral(true)),
+                False => self.add_expr(Expr::BoolLiteral(false)),
 
-            Ident => {
-                let ident = self.add_ident(tok);
-                self.add_expr(Expr::Variable(ident))
-            }
+                Ident => {
+                    let ident = self.add_ident(c, tok);
+                    self.add_expr(Expr::Variable(ident))
+                }
 
-            // prefix op
-            Minus | Bang => {
-                let lvl = prefix_lvl(tok.kind);
-                let op = tok.kind;
-                let rhs = self.parse_expr(c, lvl)?;
-                self.add_expr(Expr::Unary { op, rhs })
-            }
+                // prefix op
+                Minus | Bang => {
+                    let lvl = prefix_lvl(tok.kind);
+                    let op = tok.kind;
+                    let rhs = self.parse_expr(c, lvl)?;
+                    self.add_expr(Expr::Unary { op, rhs })
+                }
 
-            ParenL => {
-                let lhs = self.parse_expr(c, 0)?;
-                c.expect(TokenKind::ParenR, || "unclosed parenthesis in expression")?;
-                lhs
-            }
+                ParenL => {
+                    let lhs = self.parse_expr(c, 0)?;
+                    c.expect(TokenKind::ParenR, || "parenthesis grouping")?;
+                    lhs
+                }
 
-            BraceL => {
-                let block = self.parse_block(c)?;
-                self.add_expr(Expr::Block(block))
-            }
+                BraceL => {
+                    let block = self.parse_block(c)?;
+                    self.add_expr(Expr::Block(block))
+                }
 
-            //       // array literal
-            //       SquareL => {
-            //         let exprs = self.collect_listing(
-            //           |p| p.parse_expr(0),
-            //           TokenKind::Comma,
-            //           TokenKind::BraceR,
-            //           "unclosed array literal")?;
-            //
-            //         self.push_expr(Expr::Literal(ExprLiteral::Array(exprs)), t.span)
-            //       }
-            _ => return Err(self.err("malformed expression", tok)),
-        };
+                //       // array literal
+                //       SquareL => {
+                //         let exprs = self.collect_listing(
+                //           |p| p.parse_expr(0),
+                //           TokenKind::Comma,
+                //           TokenKind::BraceR,
+                //           "unclosed array literal")?;
+                //
+                //         self.push_expr(Expr::Literal(ExprLiteral::Array(exprs)), t.span)
+                //       }
+                _ => {
+                    return Err(ParseError::MalformedExpression(c.lex.token_pos(tok)));
+                }
+            };
 
         while c.has_some() {
             let op = c.peek();
@@ -365,7 +361,7 @@ impl Parser {
                             TokenKind::Comma,
                             TokenKind::ParenR,
                             |p, c| p.parse_expr(c, 0),
-                            "function call arguments",
+                            ListingKind::FuncCallArgs,
                         )?;
                         self.add_expr(Expr::Call { callee: lhs, args })
                     }
@@ -374,7 +370,7 @@ impl Parser {
                         self.add_expr(Expr::Indexing { src: lhs, idx })
                     }
                     TokenKind::Dot => {
-                        let member = self.parse_ident(c, "after struct dot operator")?;
+                        let member = self.parse_ident(c, "struct member access")?;
                         self.add_expr(Expr::Member { src: lhs, member })
                     }
                     _ => unreachable!(), // this shouldnt happen! precondition: postfix_lvl returns only these variants
@@ -392,10 +388,8 @@ impl Parser {
 
                 if c.eat(TokenKind::Question).is_some() {
                     let first = self.parse_expr(c, 0)?;
-                    c.expect(
-                        TokenKind::Colon,
-                        || "after ternary operator's first value choice",
-                    )?;
+                    c.expect(TokenKind::Colon, || "ternary operator first choice")?;
+
                     let second = self.parse_expr(c, 0)?;
                     lhs = self.add_expr(Expr::Ternary {
                         cond: lhs,
@@ -423,10 +417,11 @@ impl Parser {
     }
 
     fn parse_ty_annot(&mut self, c: &mut ParseCursor) -> ParseResult<TyAnnotId> {
-        let tok = c.advance();
+        let tok = &c.advance().clone();
+
         let ty = match tok.kind {
             TokenKind::Ident => {
-                let name = self.add_ident(tok);
+                let name = self.add_ident(c, tok);
 
                 let args = if c.eat(TokenKind::Less).is_some() {
                     self.parse_listing(
@@ -434,7 +429,7 @@ impl Parser {
                         TokenKind::Comma,
                         TokenKind::Great,
                         |p, c| p.parse_ty_annot(c),
-                        "type annotation generic arguments",
+                        ListingKind::TypeGenericsAnnot,
                     )?
                 } else {
                     Box::default()
@@ -443,7 +438,7 @@ impl Parser {
                 let ty = if c.eat(TokenKind::SquareL).is_some() {
                     let inner = self.add_ty_annot(TyAnnot::Type { name, args });
                     let size = self.parse_expr(c, 0)?;
-                    c.expect(TokenKind::SquareR, || "in array type annotation")?;
+                    c.expect(TokenKind::SquareR, || "array indexing value")?;
                     TyAnnot::Array { inner, size }
                 } else {
                     TyAnnot::Type { name, args }
@@ -458,7 +453,7 @@ impl Parser {
                     TokenKind::Comma,
                     TokenKind::ParenR,
                     |p, c| p.parse_ty_annot(c),
-                    "function annotation params",
+                    ListingKind::FuncParamsAnnot,
                 )?;
 
                 let ret = if c.eat(TokenKind::Arrow).is_some() {
@@ -476,12 +471,14 @@ impl Parser {
                     TokenKind::Comma,
                     TokenKind::ParenR,
                     |p, c| p.parse_ty_annot(c),
-                    "tuple type annotation",
+                    ListingKind::TupleAnnot,
                 )?;
 
                 self.add_ty_annot(TyAnnot::Tuple(inner))
             }
-            _ => return Err(self.err("invalid type annotation", tok)),
+            _ => {
+                return Err(ParseError::MalformedTypeAnnotation(c.lex.token_pos(tok)));
+            }
         };
 
         Ok(ty)
@@ -493,12 +490,13 @@ impl Parser {
         separator: TokenKind,
         terminator: TokenKind,
         mut getter: F,
-        what: &str,
+        what: ListingKind,
     ) -> ParseResult<List<T>>
     where
         F: FnMut(&mut Self, &mut ParseCursor) -> ParseResult<T>,
     {
         let mut list = Vec::new();
+        let start = c.peek().clone();
 
         loop {
             if c.eat(terminator).is_some() {
@@ -510,7 +508,17 @@ impl Parser {
             if c.eat(separator).is_none() {
                 // if we don't find a separator, we are expecting a terminator
                 // if we don't get a terminator, it is an error
-                c.expect(terminator, || format!("unclosed listing after {}", what))?;
+
+                // c.expect(terminator, || format!("unclosed listing after {}", what))?;
+
+                if c.eat(terminator).is_none() {
+                    return Err(ParseError::UnclosedListing {
+                        start: c.lex.pos_from_tok(&start),
+                        end: c.lex.pos_from_tok(c.peek()),
+                        what,
+                    });
+                }
+
                 break;
             }
         }
@@ -537,7 +545,10 @@ impl Parser {
         }
 
         if !is_closed {
-            return Err(self.err("unclosed block starting", &start_tok));
+            return Err(ParseError::UnclosedParenthesis {
+                kind: TokenKind::BraceR,
+                start: c.lex.pos_from_tok(&start_tok),
+            });
         }
 
         let end = StmtId(self.stmts.len() as Id);
@@ -545,7 +556,7 @@ impl Parser {
     }
 
     fn parse_var_decl(&mut self, c: &mut ParseCursor) -> ParseResult<StmtId> {
-        let name = self.parse_ident(c, "after let keyword")?;
+        let name = self.parse_ident(c, "let token")?;
 
         let ty = if c.eat(TokenKind::Colon).is_some() {
             Some(self.parse_ty_annot(c)?)
@@ -553,7 +564,7 @@ impl Parser {
             None
         };
 
-        c.expect(TokenKind::Equal, || "after var declaration's identifier")?;
+        c.expect(TokenKind::Equal, || "variable declaration identifier")?;
         let expr = self.parse_expr(c, 0)?;
         c.expect_semicolon("var declaration")?;
 
@@ -577,7 +588,7 @@ impl Parser {
                 self.add_stmt(Stmt::Expr(ret))
             }
 
-            TokenKind::Eof => return Err(self.err("reached EOF", tok)),
+            TokenKind::Eof => return Err(ParseError::ReachedEof),
 
             _ => {
                 // try to parse expression
@@ -592,38 +603,38 @@ impl Parser {
     }
 
     fn parse_toplvl_stmt(&mut self, c: &mut ParseCursor) -> ParseResult<StmtId> {
-        let tok = c.advance();
+        let tok = &c.advance().clone();
 
         let id = match tok.kind {
             TokenKind::Let => self.parse_var_decl(c)?,
 
             TokenKind::Fn => {
-                let name_tok = c.expect(TokenKind::Ident, || "after fn keyword")?;
-                let name = self.add_ident(name_tok);
+                let name_tok = c.expect(TokenKind::Ident, || "fn token")?.clone();
+                let name = self.add_ident(c, &name_tok);
 
                 let generics = if c.eat(TokenKind::Less).is_some() {
                     self.parse_listing(
                         c,
                         TokenKind::Comma,
                         TokenKind::Great,
-                        |p, c| p.parse_ident(c, "in function declaration generic params"),
-                        "function declaration generic params",
+                        |p, c| p.parse_ident(c, "function generics list"),
+                        ListingKind::TypeGenericsAnnot,
                     )?
                 } else {
                     Box::default()
                 };
 
-                c.expect(TokenKind::ParenL, || "after function declaration name")?;
+                c.expect(TokenKind::ParenL, || "function identifier or generics list")?;
                 let params = self.parse_listing(
                     c,
                     TokenKind::Comma,
                     TokenKind::ParenR,
                     |p, c| {
-                        let name = p.parse_ident(c, "in function declaration params")?;
-                        c.expect(TokenKind::Colon, || "after function declaration param name")?;
+                        let name = p.parse_ident(c, "function parameters start")?;
+                        c.expect(TokenKind::Colon, || "function parameter identifier")?;
                         Ok((name, p.parse_ty_annot(c)?))
                     },
-                    "function declaration params",
+                    ListingKind::FuncParamsAnnot,
                 )?;
 
                 let ret = if c.eat(TokenKind::Arrow).is_some() {
@@ -632,7 +643,10 @@ impl Parser {
                     None
                 };
 
-                c.expect(TokenKind::BraceL, || "after function declaration signature")?;
+                c.expect(
+                    TokenKind::BraceL,
+                    || "function parameters closing or function return type",
+                )?;
                 let code = self.parse_block(c)?;
 
                 self.add_stmt(Stmt::FuncDecl(FuncContent {
@@ -645,31 +659,31 @@ impl Parser {
             }
 
             TokenKind::Struct => {
-                let name = self.parse_ident(c, "after struct keyword")?;
+                let name = self.parse_ident(c, "struct token")?;
 
                 let generics = if c.eat(TokenKind::Less).is_some() {
                     self.parse_listing(
                         c,
                         TokenKind::Comma,
                         TokenKind::Great,
-                        |p, c| p.parse_ident(c, "in struct generic params"),
-                        "struct generic params",
+                        |p, c| p.parse_ident(c, "struct generics list"),
+                        ListingKind::TypeGenericsAnnot,
                     )?
                 } else {
                     Box::default()
                 };
 
-                c.expect(TokenKind::BraceL, || "after struct declaration name")?;
+                c.expect(TokenKind::BraceL, || "struct declaration identifier")?;
                 let fields = self.parse_listing(
                     c,
                     TokenKind::Comma,
                     TokenKind::BraceR,
                     |p, c| {
-                        let name = p.parse_ident(c, "in struct field name")?;
-                        c.expect(TokenKind::Colon, || "after struct field name")?;
+                        let name = p.parse_ident(c, "struct fields")?;
+                        c.expect(TokenKind::Colon, || "struct field name")?;
                         Ok((name, p.parse_ty_annot(c)?))
                     },
-                    "in struct fields list",
+                    ListingKind::StructFields,
                 )?;
 
                 self.add_stmt(Stmt::StructDecl(StructContent {
@@ -679,32 +693,32 @@ impl Parser {
                 }))
             }
 
-            TokenKind::Eof => Err(self.err("reached EOF", tok))?,
+            TokenKind::Eof => Err(ParseError::ReachedEof)?,
 
-            _ => Err(self.err("invalid top level statement", tok))?,
+            _ => Err(ParseError::InvalidStmtInTopLevel(c.lex.token_pos(tok)))?,
         };
 
         Ok(id)
     }
 }
 
-struct ParseCursor {
-    tokens: Vec<Token>,
+struct ParseCursor<'a> {
+    lex: &'a Lexer,
     pos: u32,
 }
-impl ParseCursor {
-    fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
+impl<'a> ParseCursor<'a> {
+    fn new(lex: &'a Lexer) -> Self {
+        Self { lex, pos: 0 }
     }
 
     fn peek(&self) -> &Token {
         // we always at least have the last EOF token, so this cant fail
         // be careful in eating loops
-        &self.tokens[self.pos as usize]
+        &self.lex.tokens[self.pos as usize]
     }
 
     fn prev(&self) -> &Token {
-        &self.tokens[self.pos.saturating_sub(1) as usize]
+        &self.lex.tokens[self.pos.saturating_sub(1) as usize]
     }
 
     fn check(&self, target: TokenKind) -> bool {
@@ -731,16 +745,17 @@ impl ParseCursor {
     fn expect<S: Into<String>, M: FnOnce() -> S>(
         &mut self,
         target: TokenKind,
-        msg: M,
+        after: M,
     ) -> ParseResult<&Token> {
         if self.check(target) {
             Ok(self.advance())
         } else {
             let tok = self.peek();
-            let err = ParseError {
-                msg: msg().into(),
-                src: tok.clone(),
-                expected: Some(target),
+            let err = ParseError::WrongToken {
+                pos: self.lex.pos_from_tok(tok),
+                expected: target,
+                actual: tok.kind,
+                after: after().into(),
             };
             Err(err)
         }
@@ -753,11 +768,11 @@ impl ParseCursor {
     }
 
     fn has_some(&self) -> bool {
-        (self.pos as usize) < self.tokens.len()
+        (self.pos as usize) < self.lex.tokens.len()
     }
 
     fn skip_while<F: FnMut(&TokenKind) -> bool>(&mut self, f: F) -> u32 {
-        let len = self.tokens[self.pos as usize..]
+        let len = self.lex.tokens[self.pos as usize..]
             .iter()
             .map(|t| t.kind)
             .take_while(f)
@@ -768,10 +783,9 @@ impl ParseCursor {
     }
 }
 
-pub fn parse(lex: Lexer) -> Parser {
-    let mut p = Parser::new(lex);
-    let tokens = std::mem::take(&mut p.lex.tokens);
-    let mut c = ParseCursor::new(tokens);
+pub fn parse(lex: &Lexer) -> Parser {
+    let mut p = Parser::default();
+    let mut c = ParseCursor::new(lex);
 
     while c.has_some() {
         match p.parse_toplvl_stmt(&mut c) {
@@ -780,6 +794,5 @@ pub fn parse(lex: Lexer) -> Parser {
         }
     }
 
-    p.lex.tokens = std::mem::take(&mut c.tokens);
     p
 }

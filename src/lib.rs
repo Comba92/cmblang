@@ -1,8 +1,11 @@
-pub mod checker;
+// pub mod checker;
 pub mod emitter;
 mod intern;
 pub mod lexer;
 pub mod parser;
+
+pub use lexer::*;
+pub use parser::*;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Span {
@@ -15,12 +18,14 @@ impl Span {
     }
     // pub fn get_str<'a, 'b>(&'a self, src: &'b str) -> &'b str { &src[self.start as usize .. self.end as usize] }
 }
+pub type Spanned<T> = (T, Span);
 
 #[derive(Debug, Clone, Copy)]
 pub struct Position {
     pub line: u32,
     pub col: u32,
 }
+pub type Positioned<T> = (T, Position);
 
 // trait CursorIter<Inner> {
 //   fn peek(&self) -> Inner { self.peek_nth(0) }
