@@ -1,3 +1,5 @@
+use crate::ParseError::MalformedExpression;
+use crate::TokenKind::BraceL;
 use crate::intern::StringInterner;
 use crate::lexer::*;
 use crate::*;
@@ -142,7 +144,7 @@ pub enum ParseError {
         pos: Position,
         expected: TokenKind,
         actual: TokenKind,
-        after: String, // TODO: should be enum? or just a message?
+        at: String, // TODO: should be enum? or just a message?
     },
 
     InvalidStmtInTopLevel(Positioned<TokenKind>),
@@ -223,14 +225,15 @@ impl Parser {
     fn report_error(&mut self, c: &mut ParseCursor, e: ParseError) {
         eprintln!("{e:?}");
         self.errors.push(e);
-
-        const UNTIL: &[TokenKind] = &[TokenKind::Fn, TokenKind::Let, TokenKind::Struct];
-        c.skip_while(|t| !UNTIL.contains(t));
-        println!("{}", c.peek())
     }
 
-    fn parse_ident(&mut self, c: &mut ParseCursor, after: &str) -> ParseResult<IdentId> {
-        let ident_tok = c.expect(TokenKind::Ident, || after)?.clone();
+    fn parse_ident(
+        &mut self,
+        c: &mut ParseCursor,
+        anchors: &[TokenKind],
+        after: &str,
+    ) -> ParseResult<IdentId> {
+        let ident_tok = c.expect(TokenKind::Ident, anchors, || after)?.clone();
         Ok(self.add_ident(c, &ident_tok))
     }
 
@@ -317,7 +320,11 @@ impl Parser {
 
                 ParenL => {
                     let lhs = self.parse_expr(c, 0)?;
-                    c.expect(TokenKind::ParenR, || "parenthesis grouping")?;
+                    c.expect(
+                        TokenKind::ParenR,
+                        &[TokenKind::Semicolon],
+                        || "expression parenthesis grouping",
+                    )?;
                     lhs
                 }
 
@@ -365,12 +372,18 @@ impl Parser {
                         )?;
                         self.add_expr(Expr::Call { callee: lhs, args })
                     }
+
                     TokenKind::SquareL => {
                         let idx = self.parse_expr(c, 0)?;
                         self.add_expr(Expr::Indexing { src: lhs, idx })
                     }
+
                     TokenKind::Dot => {
-                        let member = self.parse_ident(c, "struct member access")?;
+                        let member = self.parse_ident(
+                            c,
+                            &[TokenKind::Semicolon, TokenKind::Equal],
+                            "struct member access",
+                        )?;
                         self.add_expr(Expr::Member { src: lhs, member })
                     }
                     _ => unreachable!(), // this shouldnt happen! precondition: postfix_lvl returns only these variants
@@ -388,7 +401,11 @@ impl Parser {
 
                 if c.eat(TokenKind::Question).is_some() {
                     let first = self.parse_expr(c, 0)?;
-                    c.expect(TokenKind::Colon, || "ternary operator first choice")?;
+                    c.expect(
+                        TokenKind::Colon,
+                        &[TokenKind::Semicolon],
+                        || "ternary operator first choice",
+                    )?;
 
                     let second = self.parse_expr(c, 0)?;
                     lhs = self.add_expr(Expr::Ternary {
@@ -438,7 +455,12 @@ impl Parser {
                 let ty = if c.eat(TokenKind::SquareL).is_some() {
                     let inner = self.add_ty_annot(TyAnnot::Type { name, args });
                     let size = self.parse_expr(c, 0)?;
-                    c.expect(TokenKind::SquareR, || "array indexing value")?;
+                    c.expect(
+                        TokenKind::SquareR,
+                        &[TokenKind::Semicolon, TokenKind::Equal],
+                        || "array indexing value",
+                    )?;
+
                     TyAnnot::Array { inner, size }
                 } else {
                     TyAnnot::Type { name, args }
@@ -502,14 +524,15 @@ impl Parser {
             if c.eat(terminator).is_some() {
                 break;
             }
-            let item = getter(self, c)?;
-            list.push(item);
+
+            match getter(self, c) {
+                Ok(item) => list.push(item),
+                Err(e) => self.report_error(c, e),
+            }
 
             if c.eat(separator).is_none() {
                 // if we don't find a separator, we are expecting a terminator
                 // if we don't get a terminator, it is an error
-
-                // c.expect(terminator, || format!("unclosed listing after {}", what))?;
 
                 if c.eat(terminator).is_none() {
                     return Err(ParseError::UnclosedListing {
@@ -537,11 +560,10 @@ impl Parser {
                 break;
             }
 
-            self.parse_stmt(c)?;
-            // match self.parse_stmt(c) {
-            //   Ok(_) =>  {}
-            //   Err(e) => self.report_error(c, e),
-            // }
+            match self.parse_stmt(c) {
+                Ok(_) => {}
+                Err(e) => self.report_error(c, e),
+            }
         }
 
         if !is_closed {
@@ -556,7 +578,7 @@ impl Parser {
     }
 
     fn parse_var_decl(&mut self, c: &mut ParseCursor) -> ParseResult<StmtId> {
-        let name = self.parse_ident(c, "let token")?;
+        let name = self.parse_ident(c, &[TokenKind::Semicolon, TokenKind::Equal], "let token")?;
 
         let ty = if c.eat(TokenKind::Colon).is_some() {
             Some(self.parse_ty_annot(c)?)
@@ -564,7 +586,12 @@ impl Parser {
             None
         };
 
-        c.expect(TokenKind::Equal, || "variable declaration identifier")?;
+        c.expect(
+            TokenKind::Equal,
+            &[TokenKind::Semicolon],
+            || "variable declaration identifier",
+        )?;
+
         let expr = self.parse_expr(c, 0)?;
         c.expect_semicolon("var declaration")?;
 
@@ -584,32 +611,18 @@ impl Parser {
             TokenKind::Return => {
                 let expr = self.parse_expr(c, 0)?;
                 c.expect_semicolon("return")?;
-                let ret = self.add_expr(Expr::Return((expr)));
+                let ret = self.add_expr(Expr::Return(expr));
                 self.add_stmt(Stmt::Expr(ret))
             }
 
-            TokenKind::Eof => return Err(ParseError::ReachedEof),
-
-            _ => {
-                // try to parse expression
-                c.undo();
-                let expr = self.parse_expr(c, 0)?;
-                c.expect_semicolon("expression")?;
-                self.add_stmt(Stmt::Expr(expr))
-            }
-        };
-
-        Ok(id)
-    }
-
-    fn parse_toplvl_stmt(&mut self, c: &mut ParseCursor) -> ParseResult<StmtId> {
-        let tok = &c.advance().clone();
-
-        let id = match tok.kind {
-            TokenKind::Let => self.parse_var_decl(c)?,
-
             TokenKind::Fn => {
-                let name_tok = c.expect(TokenKind::Ident, || "fn token")?.clone();
+                let name_tok = c
+                    .expect(
+                        TokenKind::Ident,
+                        &[TokenKind::ParenL, TokenKind::ParenR, TokenKind::BraceL],
+                        || "fn token",
+                    )?
+                    .clone();
                 let name = self.add_ident(c, &name_tok);
 
                 let generics = if c.eat(TokenKind::Less).is_some() {
@@ -617,21 +630,40 @@ impl Parser {
                         c,
                         TokenKind::Comma,
                         TokenKind::Great,
-                        |p, c| p.parse_ident(c, "function generics list"),
+                        |p, c| {
+                            p.parse_ident(
+                                c,
+                                &[TokenKind::Comma, TokenKind::Great, TokenKind::ParenL],
+                                "function generics list",
+                            )
+                        },
                         ListingKind::TypeGenericsAnnot,
                     )?
                 } else {
                     Box::default()
                 };
 
-                c.expect(TokenKind::ParenL, || "function identifier or generics list")?;
+                c.expect(
+                    TokenKind::ParenL,
+                    &[TokenKind::ParenR, TokenKind::BraceL],
+                    || "function identifier or generics list",
+                )?;
+
                 let params = self.parse_listing(
                     c,
                     TokenKind::Comma,
                     TokenKind::ParenR,
                     |p, c| {
-                        let name = p.parse_ident(c, "function parameters start")?;
-                        c.expect(TokenKind::Colon, || "function parameter identifier")?;
+                        let name = p.parse_ident(
+                            c,
+                            &[TokenKind::Comma, TokenKind::ParenR, TokenKind::BraceL],
+                            "function parameters start",
+                        )?;
+                        c.expect(
+                            TokenKind::Colon,
+                            &[TokenKind::Comma, TokenKind::ParenR, TokenKind::BraceL],
+                            || "function parameter identifier",
+                        )?;
                         Ok((name, p.parse_ty_annot(c)?))
                     },
                     ListingKind::FuncParamsAnnot,
@@ -645,6 +677,12 @@ impl Parser {
 
                 c.expect(
                     TokenKind::BraceL,
+                    &[
+                        TokenKind::BraceR,
+                        TokenKind::Let,
+                        TokenKind::Fn,
+                        TokenKind::Struct,
+                    ],
                     || "function parameters closing or function return type",
                 )?;
                 let code = self.parse_block(c)?;
@@ -659,28 +697,47 @@ impl Parser {
             }
 
             TokenKind::Struct => {
-                let name = self.parse_ident(c, "struct token")?;
+                let name =
+                    self.parse_ident(c, &[TokenKind::BraceL, TokenKind::BraceR], "struct token")?;
 
                 let generics = if c.eat(TokenKind::Less).is_some() {
                     self.parse_listing(
                         c,
                         TokenKind::Comma,
                         TokenKind::Great,
-                        |p, c| p.parse_ident(c, "struct generics list"),
+                        |p, c| {
+                            p.parse_ident(
+                                c,
+                                &[TokenKind::Great, TokenKind::Comma, TokenKind::BraceL],
+                                "struct generics list",
+                            )
+                        },
                         ListingKind::TypeGenericsAnnot,
                     )?
                 } else {
                     Box::default()
                 };
 
-                c.expect(TokenKind::BraceL, || "struct declaration identifier")?;
+                c.expect(
+                    TokenKind::BraceL,
+                    &[TokenKind::BraceR],
+                    || "struct declaration identifier",
+                )?;
                 let fields = self.parse_listing(
                     c,
                     TokenKind::Comma,
                     TokenKind::BraceR,
                     |p, c| {
-                        let name = p.parse_ident(c, "struct fields")?;
-                        c.expect(TokenKind::Colon, || "struct field name")?;
+                        let name = p.parse_ident(
+                            c,
+                            &[TokenKind::Comma, TokenKind::BraceR],
+                            "struct fields",
+                        )?;
+                        c.expect(
+                            TokenKind::Colon,
+                            &[TokenKind::Comma, TokenKind::BraceR],
+                            &|| "struct field name",
+                        )?;
                         Ok((name, p.parse_ty_annot(c)?))
                     },
                     ListingKind::StructFields,
@@ -693,9 +750,22 @@ impl Parser {
                 }))
             }
 
-            TokenKind::Eof => Err(ParseError::ReachedEof)?,
+            TokenKind::Eof => return Err(ParseError::ReachedEof),
 
-            _ => Err(ParseError::InvalidStmtInTopLevel(c.lex.token_pos(tok)))?,
+            _ => {
+                // try to parse expression
+                c.undo();
+                let expr = self.parse_expr(c, 0)?;
+                // TODO: Handle malformed expressions
+                // match self.get_expr(expr) {
+                //     Expr::Variable(_) => {
+                //         return Err(MalformedExpression(c.lex.token_pos(c.prev())));
+                //     }
+                //     _ => {}
+                // }
+                c.expect_semicolon("expression")?;
+                self.add_stmt(Stmt::Expr(expr))
+            }
         };
 
         Ok(id)
@@ -745,26 +815,43 @@ impl<'a> ParseCursor<'a> {
     fn expect<S: Into<String>, M: FnOnce() -> S>(
         &mut self,
         target: TokenKind,
-        after: M,
+        anchors: &[TokenKind],
+        msg: M,
     ) -> ParseResult<&Token> {
         if self.check(target) {
             Ok(self.advance())
         } else {
-            let tok = self.peek();
+            let tok = self.peek().clone();
+
+            let mut anchors = anchors.to_vec();
+            anchors.push(target);
+
+            self.recover(&anchors);
+            self.eat(target); // we still check for the target after recovering
+
             let err = ParseError::WrongToken {
-                pos: self.lex.pos_from_tok(tok),
+                pos: self.lex.pos_from_tok(&tok),
                 expected: target,
                 actual: tok.kind,
-                after: after().into(),
+                at: msg().into(),
             };
             Err(err)
         }
     }
 
     fn expect_semicolon(&mut self, msg: &str) -> ParseResult<&Token> {
-        self.expect(TokenKind::Semicolon, || {
-            format!("at end of {msg} statement")
-        })
+        if self.check(TokenKind::Semicolon) {
+            Ok(self.advance())
+        } else {
+            let tok = self.peek().clone();
+            let err = ParseError::WrongToken {
+                pos: self.lex.pos_from_tok(&tok),
+                expected: TokenKind::Semicolon,
+                actual: tok.kind,
+                at: format!("end of {msg} statement"),
+            };
+            Err(err)
+        }
     }
 
     fn has_some(&self) -> bool {
@@ -781,6 +868,21 @@ impl<'a> ParseCursor<'a> {
         self.pos += len as u32;
         len as u32
     }
+
+    fn recover(&mut self, anchors: &[TokenKind]) -> Span {
+        let start = self.pos;
+        let len = self.skip_while(|t| !anchors.contains(t));
+
+        if !self.has_some() {
+            // stay pointing at EOF token
+            self.undo();
+        }
+
+        Span {
+            start,
+            end: len + start,
+        }
+    }
 }
 
 pub fn parse(lex: &Lexer) -> Parser {
@@ -788,8 +890,8 @@ pub fn parse(lex: &Lexer) -> Parser {
     let mut c = ParseCursor::new(lex);
 
     while c.has_some() {
-        match p.parse_toplvl_stmt(&mut c) {
-            Ok(id) => p.toplvl_stmts.push(id),
+        match p.parse_stmt(&mut c) {
+            Ok(id) => {}
             Err(e) => p.report_error(&mut c, e),
         }
     }

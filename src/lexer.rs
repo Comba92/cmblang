@@ -206,6 +206,10 @@ impl Lexer {
             col: column as u32,
         }
     }
+
+    pub fn line_string(&self, pos: &Position) -> &str {
+        &self.input.lines().nth(pos.line as usize - 1).unwrap()
+    }
 }
 
 struct LexCursor<'a> {

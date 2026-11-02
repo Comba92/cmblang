@@ -49,7 +49,7 @@ impl Environment {
     }
 }
 
-type TypeId = Id;
+struct TypeId(pub Id);
 
 #[derive(Debug, Clone)]
 enum Type {
