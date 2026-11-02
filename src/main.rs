@@ -12,12 +12,19 @@ fn main() {
     }
 
     let parser = parse(&lex);
-    println!("{:?}", parser.stmts);
-    println!("{:?}", parser.exprs);
-    println!("{:?}", parser.types);
-    println!("{:?}", parser.idents);
+    for (i, stmt) in parser.stmts.iter().enumerate() {
+        println!("{i} == {:?}", stmt);
+    }
 
-    // let checker = check(parser);
+    println!();
+
+    for (i, expr) in parser.exprs.iter().enumerate() {
+        println!("{i} == {:?}", expr);
+    }
+
+    println!();
+
+    // let checker = typecheck(parser);
 
     // for line in io::stdin().lines() {
     //   match line {

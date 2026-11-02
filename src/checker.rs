@@ -1,15 +1,17 @@
 use crate::parser::*;
-use crate::*;
 use std::collections::HashMap;
 
 // https://www.reddit.com/r/ProgrammingLanguages/comments/v5zwlw/resources_for_building_a_typechecker/
 // https://www.reddit.com/r/ProgrammingLanguages/comments/8kox21/help_implementing_a_type_checker/
 // https://www.reddit.com/r/ProgrammingLanguages/comments/1nhy0ef/how_do_i_make_a_real_typechecker/
 // https://www.reddit.com/r/ProgrammingLanguages/comments/1gkjkz4/how_to_implement_local_type_inference/
+
 // https://ettolrach.com/blog/bidirectional_inference.html
 // https://thunderseethe.dev/posts/how-to-choose-between-hm-and-bidir/
 // https://thunderseethe.dev/posts/bidirectional-constraint-generation/
 
+#[derive(Debug, Clone, Copy)]
+struct TypeId(pub Id);
 type Scope = HashMap<IdentId, TypeId>;
 struct Environment {
     scopes: Vec<Scope>,
@@ -49,8 +51,6 @@ impl Environment {
     }
 }
 
-struct TypeId(pub Id);
-
 #[derive(Debug, Clone)]
 enum Type {
     Void,
@@ -72,10 +72,11 @@ enum Type {
     Tuple(List<TypeId>),
 }
 
-const VOID_ID: u32 = 0;
-const BOOL_ID: u32 = 1;
-const INT_ID: u32 = 2;
-const FLOAT_ID: u32 = 3;
+const VOID_ID: TypeId = TypeId(0);
+const BOOL_ID: TypeId = TypeId(1);
+const INT_ID: TypeId = TypeId(2);
+const FLOAT_ID: TypeId = TypeId(3);
+
 const PRIMITIVES: &[(Type, TypeId)] = &[
     (Type::Void, VOID_ID),
     (Type::Bool, BOOL_ID),
@@ -90,7 +91,7 @@ enum TypeErrorKind {
     WrongTypecheck { expected: Type, actual: Type },
     RequiredAnnotation,
 
-    InvalidStmtInTopLevel,
+    InvalidStmtInGlobal,
     InvalidStmtInBlock,
 
     CallingWithWrongType,
@@ -130,11 +131,11 @@ impl Typechecker {
     fn add_type(&mut self, ty: Type) -> TypeId {
         let id = self.types.len();
         self.types.push(ty);
-        id as TypeId
+        TypeId(id as Id)
     }
 
     fn get_type(&self, id: TypeId) -> &Type {
-        &self.types[id as usize]
+        &self.types[id.0 as usize]
     }
 
     fn add_annotation_as_type(&mut self, ast: &Parser, annot: TyAnnotId) -> TypeId {
@@ -165,9 +166,15 @@ impl Typechecker {
                     list.push(id);
                 }
 
+                let ret = if let Some(ret) = ret {
+                    self.add_annotation_as_type(ast, *ret)
+                } else {
+                    VOID_ID
+                };
+
                 Type::Func {
                     params: list.into(),
-                    ret: ret.unwrap_or(VOID_ID),
+                    ret,
                 }
             }
 
@@ -185,8 +192,8 @@ impl Typechecker {
         self.add_type(ty)
     }
 
-    fn toplvl_pass(&mut self, ast: &Parser) {
-        for stmt_id in &ast.toplvl_stmts {
+    fn global_pass(&mut self, ast: &Parser) {
+        for stmt_id in &ast.global_stmts {
             let stmt = ast.get_stmt(*stmt_id);
             match stmt {
                 Stmt::FuncDecl(content) => {
@@ -198,7 +205,11 @@ impl Typechecker {
                     };
 
                     let ty = Type::Func {
-                        params: content.params.iter().map(|p| p.1).collect(),
+                        params: content
+                            .params
+                            .iter()
+                            .map(|p| self.add_annotation_as_type(ast, p.1))
+                            .collect(),
                         ret,
                     };
                     let ty_id = self.add_type(ty);
@@ -228,8 +239,8 @@ impl Typechecker {
         Ok(())
     }
 
-    fn typecheck(&mut self, ast: &Parser, stmt: &Stmt) -> TypeResult<()> {
-        match stmt {
+    fn typecheck(&mut self, ast: &Parser, stmt_id: StmtId) -> TypeResult<()> {
+        match ast.get_stmt(stmt_id) {
             Stmt::VarDecl(content) => self.var_decl(ast, content)?,
 
             Stmt::FuncDecl(content) => {
@@ -249,7 +260,7 @@ impl Typechecker {
                 };
 
                 let ret_actual = ret_actual?;
-                if ret_actual != ret_expected {
+                if ret_actual.0 != ret_expected.0 {
                     let err = TypeError::new(TypeErrorKind::WrongTypecheck {
                         expected: self.get_type(ret_expected).clone(),
                         actual: self.get_type(ret_actual).clone(),
@@ -262,7 +273,7 @@ impl Typechecker {
             Stmt::StructDecl(_) => {} // Do nothing, already done in toplvl_pass
 
             Stmt::Expr(_) => {
-                let err = TypeError::new(TypeErrorKind::InvalidStmtInTopLevel);
+                let err = TypeError::new(TypeErrorKind::InvalidStmtInGlobal);
                 Err(err)?
             }
         }
@@ -272,8 +283,8 @@ impl Typechecker {
 
     fn typecheck_block(&mut self, ast: &Parser, block: &Block) -> TypeResult<TypeId> {
         let mut ty = None;
-        for stmt_id in block.start..block.end {
-            let stmt = ast.get_stmt(stmt_id);
+        for stmt_id in block.start.0..block.end.0 {
+            let stmt = ast.get_stmt(StmtId(stmt_id));
             match stmt {
                 Stmt::VarDecl(content) => self.var_decl(ast, content)?,
 
@@ -334,19 +345,17 @@ impl Typechecker {
             }
 
             Expr::Call { callee, args } => {
-                let func_ty = self
-                    .env
-                    .lookup(*callee)
-                    .ok_or_else(|| TypeError::new(TypeErrorKind::UndeclaredVar))?;
-
-                match self.get_type(func_ty).clone() {
-                    // we must clone to both access params and do check
+                let ty_id = self.infer(ast, *callee)?;
+                match self.get_type(ty_id).clone() {
                     Type::Func { params, ret } => {
+                        // we must clone to both access params and do check
+
                         for (param, arg) in params.iter().zip(args.iter()) {
                             self.check(ast, *arg, *param)?;
                         }
                         ret
                     }
+
                     _ => Err(TypeError::new(TypeErrorKind::CallingWithWrongType))?,
                 }
             }
@@ -391,7 +400,7 @@ impl Typechecker {
             }
         };
 
-        if res_ty != target {
+        if res_ty.0 != target.0 {
             let err = TypeError::new(TypeErrorKind::WrongTypecheck {
                 expected: self.get_type(target).clone(),
                 actual: self.get_type(res_ty).clone(),
@@ -403,16 +412,16 @@ impl Typechecker {
     }
 }
 
-pub fn check(ast: Parser) {
+pub fn typecheck(ast: Parser) {
     // first pass: gather top level symbols (struct definitions and function signatures)
     // second pass, global variables and scan funtion bodies
 
     let mut tc = Typechecker::default();
-    tc.toplvl_pass(&ast);
+    tc.global_pass(&ast);
 
-    let mut iter = ast.stmts.iter();
-    while let Some(stmt) = iter.next() {
-        match tc.typecheck(&ast, stmt) {
+    let mut iter = ast.global_stmts.iter(); // TODO should iter toplvl array here
+    while let Some(stmt_id) = iter.next() {
+        match tc.typecheck(&ast, *stmt_id) {
             Ok(_) => {}
             Err(e) => {
                 eprintln!("{e:?}");

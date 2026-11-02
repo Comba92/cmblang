@@ -4,6 +4,7 @@ mod intern;
 pub mod lexer;
 pub mod parser;
 
+// pub use checker::*;
 pub use lexer::*;
 pub use parser::*;
 
