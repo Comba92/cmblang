@@ -1,5 +1,3 @@
-use crate::ParseError::MalformedExpression;
-use crate::TokenKind::BraceL;
 use crate::intern::StringInterner;
 use crate::lexer::*;
 use crate::*;
@@ -126,8 +124,6 @@ pub enum Stmt {
     Expr(ExprId),
 }
 
-type ParseResult<T> = Result<T, ParseError>;
-
 #[derive(Debug)]
 pub enum ListingKind {
     Block,
@@ -139,42 +135,39 @@ pub enum ListingKind {
 }
 
 #[derive(Debug)]
-pub enum ParseError {
+pub enum ParseErrorKind {
     WrongToken {
-        pos: Position,
         expected: TokenKind,
         actual: TokenKind,
-        at: String, // TODO: should be enum? or just a message?
+        at: String,
     },
 
-    InvalidStmtInTopLevel(Positioned<TokenKind>),
-    InvalidStmtInBlock(Positioned<TokenKind>),
+    InvalidCharacter,
 
-    IntParseError {
-        inner: std::num::ParseIntError,
-        pos: Position,
-    },
-    FloatParseError {
-        inner: std::num::ParseFloatError,
-        pos: Position,
-    },
+    InvalidStmtInTopLevel,
+    InvalidStmtInBlock,
 
-    UnclosedParenthesis {
-        kind: TokenKind,
-        start: Position,
-    },
+    IntParseError(std::num::ParseIntError),
+    FloatParseError(std::num::ParseFloatError),
 
-    UnclosedListing {
-        start: Position,
-        end: Position,
-        what: ListingKind,
-    },
+    UnclosedBlock,
+    UnclosedListing(ListingKind),
 
-    MalformedExpression(Positioned<TokenKind>),
-    MalformedTypeAnnotation(Positioned<TokenKind>),
+    MalformedExpression,
+    MalformedTypeAnnotation,
 
     ReachedEof,
 }
+
+fn err_span(err: ParseErrorKind, span: Span) -> ParseError {
+    (err, span)
+}
+fn err_tok(err: ParseErrorKind, tok: &Token) -> ParseError {
+    err_span(err, tok.span)
+}
+
+type ParseError = Spanned<ParseErrorKind>;
+type ParseResult<T> = Result<T, ParseError>;
 
 #[derive(Default)]
 pub struct Parser {
@@ -189,7 +182,7 @@ pub struct Parser {
 
 impl Parser {
     fn add_ident(&mut self, c: &ParseCursor, tok: &Token) -> IdentId {
-        IdentId(self.idents.add(c.lex.token_string(tok)))
+        IdentId(self.idents.add(c.lex.string_tok(tok)))
     }
 
     fn add_ty_annot(&mut self, ty: TyAnnot) -> TyAnnotId {
@@ -223,7 +216,13 @@ impl Parser {
     }
 
     fn report_error(&mut self, c: &mut ParseCursor, e: ParseError) {
-        eprintln!("{e:?}");
+        eprintln!(
+            "{:?} {:?} {:?} {:?}",
+            c.lex.string_span(&e.1),
+            e.0,
+            c.lex.pos_from_offset(e.1.start),
+            c.lex.pos_from_offset(e.1.end)
+        );
         self.errors.push(e);
     }
 
@@ -277,76 +276,71 @@ impl Parser {
 
         let tok = &c.advance().clone();
 
-        use TokenKind::*;
-        let mut lhs =
-            match tok.kind {
-                IntNumber => {
-                    let num =
-                        c.lex
-                            .token_string(tok)
-                            .parse()
-                            .map_err(|e| ParseError::IntParseError {
-                                inner: e,
-                                pos: c.lex.pos_from_tok(tok),
-                            })?;
-                    self.add_expr(Expr::IntLiteral(num))
-                }
+        let mut lhs = match tok.kind {
+            TokenKind::IntNumber => {
+                let num = c
+                    .lex
+                    .string_tok(tok)
+                    .parse()
+                    .map_err(|e| err_tok(ParseErrorKind::IntParseError(e), tok))?;
+                self.add_expr(Expr::IntLiteral(num))
+            }
 
-                FloatNumber => {
-                    let num = c.lex.token_string(tok).parse().map_err(|e| {
-                        ParseError::FloatParseError {
-                            inner: e,
-                            pos: c.lex.pos_from_tok(tok),
-                        }
-                    })?;
-                    self.add_expr(Expr::FloatLiteral(num))
-                }
+            TokenKind::FloatNumber => {
+                let num = c
+                    .lex
+                    .string_tok(tok)
+                    .parse()
+                    .map_err(|e| err_tok(ParseErrorKind::FloatParseError(e), tok))?;
+                self.add_expr(Expr::FloatLiteral(num))
+            }
 
-                True => self.add_expr(Expr::BoolLiteral(true)),
-                False => self.add_expr(Expr::BoolLiteral(false)),
+            TokenKind::True => self.add_expr(Expr::BoolLiteral(true)),
+            TokenKind::False => self.add_expr(Expr::BoolLiteral(false)),
 
-                Ident => {
-                    let ident = self.add_ident(c, tok);
-                    self.add_expr(Expr::Variable(ident))
-                }
+            TokenKind::Ident => {
+                let ident = self.add_ident(c, tok);
+                self.add_expr(Expr::Variable(ident))
+            }
 
-                // prefix op
-                Minus | Bang => {
-                    let lvl = prefix_lvl(tok.kind);
-                    let op = tok.kind;
-                    let rhs = self.parse_expr(c, lvl)?;
-                    self.add_expr(Expr::Unary { op, rhs })
-                }
+            // prefix op
+            TokenKind::Minus | TokenKind::Bang => {
+                let lvl = prefix_lvl(tok.kind);
+                let op = tok.kind;
+                let rhs = self.parse_expr(c, lvl)?;
+                self.add_expr(Expr::Unary { op, rhs })
+            }
 
-                ParenL => {
-                    let lhs = self.parse_expr(c, 0)?;
-                    c.expect(
-                        TokenKind::ParenR,
-                        &[TokenKind::Semicolon],
-                        || "expression parenthesis grouping",
-                    )?;
-                    lhs
-                }
+            TokenKind::ParenL => {
+                let lhs = self.parse_expr(c, 0)?;
+                c.expect(
+                    TokenKind::ParenR,
+                    &[TokenKind::Semicolon],
+                    || "expression parenthesis grouping",
+                )?;
+                lhs
+            }
 
-                BraceL => {
-                    let block = self.parse_block(c)?;
-                    self.add_expr(Expr::Block(block))
-                }
+            TokenKind::BraceL => {
+                let block = self.parse_block(c)?;
+                self.add_expr(Expr::Block(block))
+            }
 
-                //       // array literal
-                //       SquareL => {
-                //         let exprs = self.collect_listing(
-                //           |p| p.parse_expr(0),
-                //           TokenKind::Comma,
-                //           TokenKind::BraceR,
-                //           "unclosed array literal")?;
-                //
-                //         self.push_expr(Expr::Literal(ExprLiteral::Array(exprs)), t.span)
-                //       }
-                _ => {
-                    return Err(ParseError::MalformedExpression(c.lex.token_pos(tok)));
-                }
-            };
+            //       // array literal
+            //       SquareL => {
+            //         let exprs = self.collect_listing(
+            //           |p| p.parse_expr(0),
+            //           TokenKind::Comma,
+            //           TokenKind::BraceR,
+            //           "unclosed array literal")?;
+            //
+            //         self.push_expr(Expr::Literal(ExprLiteral::Array(exprs)), t.span)
+            //       }
+            TokenKind::Invalid => return Err(err_tok(ParseErrorKind::InvalidCharacter, tok)),
+            _ => {
+                return Err(err_tok(ParseErrorKind::MalformedExpression, tok));
+            }
+        };
 
         while c.has_some() {
             let op = c.peek();
@@ -498,8 +492,10 @@ impl Parser {
 
                 self.add_ty_annot(TyAnnot::Tuple(inner))
             }
+
+            TokenKind::Invalid => return Err(err_tok(ParseErrorKind::InvalidCharacter, tok)),
             _ => {
-                return Err(ParseError::MalformedTypeAnnotation(c.lex.token_pos(tok)));
+                return Err(err_tok(ParseErrorKind::MalformedTypeAnnotation, tok));
             }
         };
 
@@ -520,14 +516,17 @@ impl Parser {
         let mut list = Vec::new();
         let start = c.peek().clone();
 
-        loop {
+        while c.has_some() {
             if c.eat(terminator).is_some() {
                 break;
             }
 
             match getter(self, c) {
                 Ok(item) => list.push(item),
-                Err(e) => self.report_error(c, e),
+                Err(e) => {
+                    self.report_error(c, e);
+                    c.recover(&[separator, terminator]);
+                }
             }
 
             if c.eat(separator).is_none() {
@@ -535,11 +534,8 @@ impl Parser {
                 // if we don't get a terminator, it is an error
 
                 if c.eat(terminator).is_none() {
-                    return Err(ParseError::UnclosedListing {
-                        start: c.lex.pos_from_tok(&start),
-                        end: c.lex.pos_from_tok(c.peek()),
-                        what,
-                    });
+                    let span = Span::merge(&start.span, &c.peek().span);
+                    return Err(err_span(ParseErrorKind::UnclosedListing(what), span));
                 }
 
                 break;
@@ -562,15 +558,15 @@ impl Parser {
 
             match self.parse_stmt(c) {
                 Ok(_) => {}
-                Err(e) => self.report_error(c, e),
+                Err(e) => {
+                    self.report_error(c, e);
+                    c.recover(&[TokenKind::Semicolon, TokenKind::BraceR]);
+                }
             }
         }
 
         if !is_closed {
-            return Err(ParseError::UnclosedParenthesis {
-                kind: TokenKind::BraceR,
-                start: c.lex.pos_from_tok(&start_tok),
-            });
+            return Err(err_tok(ParseErrorKind::UnclosedBlock, &start_tok));
         }
 
         let end = StmtId(self.stmts.len() as Id);
@@ -750,7 +746,8 @@ impl Parser {
                 }))
             }
 
-            TokenKind::Eof => return Err(ParseError::ReachedEof),
+            TokenKind::Invalid => return Err(err_tok(ParseErrorKind::InvalidCharacter, tok)),
+            TokenKind::Eof => return Err(err_tok(ParseErrorKind::ReachedEof, tok)),
 
             _ => {
                 // try to parse expression
@@ -829,12 +826,14 @@ impl<'a> ParseCursor<'a> {
             self.recover(&anchors);
             self.eat(target); // we still check for the target after recovering
 
-            let err = ParseError::WrongToken {
-                pos: self.lex.pos_from_tok(&tok),
-                expected: target,
-                actual: tok.kind,
-                at: msg().into(),
-            };
+            let err = err_span(
+                ParseErrorKind::WrongToken {
+                    expected: target,
+                    actual: tok.kind,
+                    at: msg().into(),
+                },
+                tok.span.merge(&self.prev().span),
+            );
             Err(err)
         }
     }
@@ -844,18 +843,21 @@ impl<'a> ParseCursor<'a> {
             Ok(self.advance())
         } else {
             let tok = self.peek().clone();
-            let err = ParseError::WrongToken {
-                pos: self.lex.pos_from_tok(&tok),
-                expected: TokenKind::Semicolon,
-                actual: tok.kind,
-                at: format!("end of {msg} statement"),
-            };
+            let err = err_tok(
+                ParseErrorKind::WrongToken {
+                    expected: TokenKind::Semicolon,
+                    actual: tok.kind,
+                    at: format!("end of {msg} statement"),
+                },
+                &tok,
+            );
             Err(err)
         }
     }
 
     fn has_some(&self) -> bool {
-        (self.pos as usize) < self.lex.tokens.len()
+        // do not count EOF token
+        (self.pos as usize) < self.lex.tokens.len() - 1
     }
 
     fn skip_while<F: FnMut(&TokenKind) -> bool>(&mut self, f: F) -> u32 {
@@ -869,18 +871,12 @@ impl<'a> ParseCursor<'a> {
         len as u32
     }
 
-    fn recover(&mut self, anchors: &[TokenKind]) -> Span {
-        let start = self.pos;
-        let len = self.skip_while(|t| !anchors.contains(t));
+    fn recover(&mut self, anchors: &[TokenKind]) {
+        self.skip_while(|t| !anchors.contains(t));
 
         if !self.has_some() {
             // stay pointing at EOF token
             self.undo();
-        }
-
-        Span {
-            start,
-            end: len + start,
         }
     }
 }
@@ -891,7 +887,7 @@ pub fn parse(lex: &Lexer) -> Parser {
 
     while c.has_some() {
         match p.parse_stmt(&mut c) {
-            Ok(id) => {}
+            Ok(_) => {}
             Err(e) => p.report_error(&mut c, e),
         }
     }

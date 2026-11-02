@@ -183,8 +183,12 @@ impl Lexer {
         (tok.kind, self.pos_from_tok(tok))
     }
 
-    pub fn token_string(&self, tok: &Token) -> &str {
-        &self.input[tok.span.start as usize..tok.span.end as usize]
+    pub fn string_tok(&self, tok: &Token) -> &str {
+        self.string_span(&tok.span)
+    }
+
+    pub fn string_span(&self, span: &Span) -> &str {
+        &self.input[span.start as usize..span.end as usize]
     }
 
     pub fn pos_from_tok(&self, tok: &Token) -> Position {
@@ -380,11 +384,13 @@ pub fn scan(input: String) -> Result<Lexer, LexError> {
         });
     }
 
+    // BE CAREFUL: EOF character isn't really there, meaning you can't slice it from the input string.
+    // By having len = 0 (start = end), the slice will be empty so no out of bounds accesses can occur
     lex.tokens.push(Token {
         kind: TokenKind::Eof,
         span: Span {
             start: cursor.pos,
-            end: cursor.pos + 1,
+            end: cursor.pos,
         },
     });
 

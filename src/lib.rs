@@ -16,6 +16,12 @@ impl Span {
     pub fn len(&self) -> u32 {
         self.end - self.start
     }
+    pub fn merge(&self, other: &Self) -> Self {
+        Self {
+            start: self.start.min(other.start),
+            end: self.end.max(other.end),
+        }
+    }
     // pub fn get_str<'a, 'b>(&'a self, src: &'b str) -> &'b str { &src[self.start as usize .. self.end as usize] }
 }
 pub type Spanned<T> = (T, Span);
