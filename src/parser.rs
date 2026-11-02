@@ -1,0 +1,785 @@
+use crate::intern::StringInterner;
+use crate::lexer::*;
+use crate::*;
+
+// OPT:
+// https://jhwlr.io/super-flat-ast/
+// https://thunderseethe.dev/posts/parser-base/
+
+pub type Id = u32;
+#[derive(Debug, Clone, Copy)]
+pub struct ExprId(pub Id);
+#[derive(Debug, Clone, Copy)]
+pub struct StmtId(pub Id);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct IdentId(pub Id);
+#[derive(Debug, Clone, Copy)]
+pub struct TyAnnotId(pub Id);
+
+pub type Spanned<T> = (T, Span);
+pub type List<T> = Box<[T]>;
+
+#[derive(Debug, Clone)]
+// Statements indexes are [start, end)
+pub struct Block {
+    pub start: StmtId,
+    pub end: StmtId,
+}
+
+#[derive(Debug, Clone)]
+pub enum Expr {
+    IntLiteral(u32),
+    FloatLiteral(f32),
+    BoolLiteral(bool),
+    // ArrayLiteral(List<ExprId>),
+    Variable(IdentId),
+    // Assign { lhs: ExprId, rhs: ExprId },
+    Return(ExprId),
+
+    Unary {
+        op: TokenKind,
+        rhs: ExprId,
+    },
+    Binary {
+        op: TokenKind,
+        lhs: ExprId,
+        rhs: ExprId,
+    },
+    Ternary {
+        cond: ExprId,
+        first: ExprId,
+        second: ExprId,
+    },
+
+    Call {
+        callee: ExprId,
+        args: List<ExprId>,
+    },
+    Indexing {
+        src: ExprId,
+        idx: ExprId,
+    },
+    Member {
+        src: ExprId,
+        member: IdentId,
+    },
+
+    Block(Block),
+}
+impl Expr {
+    fn is_assignable(&self) -> bool {
+        use Expr::*;
+
+        match self {
+            Variable(_) | Indexing { .. } | Member { .. } => true,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum TyAnnot {
+    Type {
+        name: IdentId,
+        args: List<TyAnnotId>,
+    },
+    Array {
+        inner: TyAnnotId,
+        size: ExprId,
+    },
+    Tuple(List<TyAnnotId>),
+    Func {
+        params: List<TyAnnotId>,
+        ret: Option<TyAnnotId>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct VarContent {
+    pub name: IdentId,
+    pub ty: Option<TyAnnotId>,
+    pub rhs: ExprId,
+}
+
+#[derive(Debug, Clone)]
+pub struct FuncContent {
+    pub name: IdentId,
+    pub generics: List<IdentId>,
+    pub params: List<(IdentId, TyAnnotId)>,
+    pub ret: Option<TyAnnotId>,
+    pub code: Block,
+}
+
+#[derive(Debug, Clone)]
+pub struct StructContent {
+    pub name: IdentId,
+    pub generics: List<IdentId>,
+    pub fields: List<(IdentId, TyAnnotId)>,
+}
+
+#[derive(Debug, Clone)]
+pub enum Stmt {
+    VarDecl(VarContent),
+    FuncDecl(FuncContent),
+    StructDecl(StructContent),
+    Expr(ExprId),
+}
+
+type ParseResult<T> = Result<T, ParseError>;
+
+#[derive(Debug)]
+pub struct ParseError {
+    msg: String,
+    expected: Option<TokenKind>,
+    src: Token,
+}
+
+// #[derive(Debug)]
+// pub enum ParseError {
+//     InvalidStmtInTopLevel,
+//     InvalidStmtInBlock,
+//     IntParseError(std::num::ParseIntError),
+//     FloatParseError(std::num::ParseFloatError),
+//     UnclosedParenthesis {
+//         start: Position,
+//         end: Position,
+//     },
+//     UnclosedListing {
+//         start: Position,
+//         end: Position,
+//         what: String,
+//     },
+//     MalformedExpression(Position),
+//     WrongToken {
+//         expected: TokenKind,
+//         actual: TokenKind,
+//         after: TokenKind,
+//     },
+// }
+
+pub struct Parser {
+    lex: Lexer,
+    pub errors: Vec<ParseError>,
+    pub idents: StringInterner,
+    pub exprs: Vec<Expr>,
+    pub stmts: Vec<Stmt>,
+    pub toplvl_stmts: Vec<StmtId>,
+    pub types: Vec<TyAnnot>,
+}
+
+impl Parser {
+    fn new(lex: Lexer) -> Self {
+        Self {
+            lex,
+            idents: StringInterner::default(),
+            errors: vec![],
+            exprs: vec![],
+            stmts: vec![],
+            toplvl_stmts: vec![],
+            types: vec![],
+        }
+    }
+
+    fn add_ident(&mut self, tok: &Token) -> IdentId {
+        IdentId(self.idents.add(self.lex.token_string(tok)))
+    }
+
+    fn add_ty_annot(&mut self, ty: TyAnnot) -> TyAnnotId {
+        let id = self.types.len();
+        self.types.push(ty);
+        TyAnnotId(id as Id)
+    }
+
+    fn add_stmt(&mut self, stmt: Stmt) -> StmtId {
+        let id = self.stmts.len();
+        self.stmts.push(stmt);
+        StmtId(id as Id)
+    }
+
+    fn add_expr(&mut self, expr: Expr) -> ExprId {
+        let id = self.exprs.len();
+        self.exprs.push(expr);
+        ExprId(id as Id)
+    }
+
+    pub fn get_expr(&self, expr: ExprId) -> &Expr {
+        &self.exprs[expr.0 as usize]
+    }
+
+    pub fn get_stmt(&self, stmt: StmtId) -> &Stmt {
+        &self.stmts[stmt.0 as usize]
+    }
+
+    pub fn get_ident(&self, ident: IdentId) -> &str {
+        self.idents.get(ident.0)
+    }
+
+    fn err<S: Into<String>>(&self, msg: S, tok: &Token) -> ParseError {
+        ParseError {
+            msg: msg.into(),
+            expected: None,
+            src: tok.clone(),
+        }
+    }
+
+    fn report_error(&mut self, c: &mut ParseCursor, e: ParseError) {
+        let pos = self.lex.line_and_column_from_offset(e.src.span.start);
+        let msg = if let Some(target) = e.expected {
+            format!(
+                "expected '{}' token {}, got token '{}', at line {}:{}",
+                target, e.msg, e.src.kind, pos.line, pos.col
+            )
+        } else {
+            format!(
+                "{} at token '{}' at line {}:{}",
+                e.msg, e.src.kind, pos.line, pos.col
+            )
+        };
+
+        self.errors.push(e);
+        eprintln!("{msg}");
+
+        const UNTIL: &[TokenKind] = &[TokenKind::Fn, TokenKind::Let, TokenKind::Struct];
+        c.skip_while(|t| !UNTIL.contains(t));
+    }
+
+    fn parse_ident(&mut self, c: &mut ParseCursor, msg: &str) -> ParseResult<IdentId> {
+        let ident_tok = c.expect(TokenKind::Ident, || msg)?;
+        Ok(self.add_ident(ident_tok))
+    }
+
+    // https://matklad.github.io/2020/04/13/simple-but-powerful-pratt-parsing.html
+    fn parse_expr(&mut self, c: &mut ParseCursor, prec_lvl: i32) -> ParseResult<ExprId> {
+        fn prefix_lvl(kind: TokenKind) -> i32 {
+            match kind {
+                TokenKind::Minus => 30,
+                TokenKind::Bang => 29,
+                _ => -1,
+            }
+        }
+
+        fn postfix_lvl(kind: TokenKind) -> Option<i32> {
+            let lvl = match kind {
+                TokenKind::ParenL => 32,
+                TokenKind::SquareL => 33,
+                TokenKind::Dot => 34,
+                _ => return None,
+            };
+
+            Some(lvl)
+        }
+
+        fn infix_lvl(kind: TokenKind) -> Option<(i32, i32)> {
+            use TokenKind::*;
+
+            let lvl = match kind {
+                Plus | Minus => (23, 24),
+                EqualEq | NotEq => (16, 17),
+                Great | GreatEq | Less | LessEq => (14, 15),
+                Star | Slash | Perc => (25, 26),
+                And => (12, 13),
+                Or => (10, 11),
+                Caret => (27, 28),
+                _ => return None,
+            };
+
+            Some(lvl)
+        }
+
+        let tok = c.advance();
+
+        use TokenKind::*;
+        let mut lhs = match tok.kind {
+            IntNumber => {
+                let num = self.lex.token_string(tok).parse().map_err(|_| {
+                    self.err("error while parsing integer number literal token", tok)
+                })?;
+                self.add_expr(Expr::IntLiteral(num))
+            }
+
+            FloatNumber => {
+                let num =
+                    self.lex.token_string(tok).parse().map_err(|_| {
+                        self.err("error while parsing float number literal token", tok)
+                    })?;
+                self.add_expr(Expr::FloatLiteral(num))
+            }
+
+            True => self.add_expr(Expr::BoolLiteral(true)),
+            False => self.add_expr(Expr::BoolLiteral(false)),
+
+            Ident => {
+                let ident = self.add_ident(tok);
+                self.add_expr(Expr::Variable(ident))
+            }
+
+            // prefix op
+            Minus | Bang => {
+                let lvl = prefix_lvl(tok.kind);
+                let op = tok.kind;
+                let rhs = self.parse_expr(c, lvl)?;
+                self.add_expr(Expr::Unary { op, rhs })
+            }
+
+            ParenL => {
+                let lhs = self.parse_expr(c, 0)?;
+                c.expect(TokenKind::ParenR, || "unclosed parenthesis in expression")?;
+                lhs
+            }
+
+            BraceL => {
+                let block = self.parse_block(c)?;
+                self.add_expr(Expr::Block(block))
+            }
+
+            //       // array literal
+            //       SquareL => {
+            //         let exprs = self.collect_listing(
+            //           |p| p.parse_expr(0),
+            //           TokenKind::Comma,
+            //           TokenKind::BraceR,
+            //           "unclosed array literal")?;
+            //
+            //         self.push_expr(Expr::Literal(ExprLiteral::Array(exprs)), t.span)
+            //       }
+            _ => return Err(self.err("malformed expression", tok)),
+        };
+
+        while c.has_some() {
+            let op = c.peek();
+            if !op.kind.is_op() {
+                break;
+            }
+
+            if let Some(postfix_lvl) = postfix_lvl(op.kind) {
+                if postfix_lvl < prec_lvl {
+                    break;
+                }
+                let op = op.clone();
+                c.advance();
+
+                lhs = match op.kind {
+                    TokenKind::ParenL => {
+                        let args = self.parse_listing(
+                            c,
+                            TokenKind::Comma,
+                            TokenKind::ParenR,
+                            |p, c| p.parse_expr(c, 0),
+                            "function call arguments",
+                        )?;
+                        self.add_expr(Expr::Call { callee: lhs, args })
+                    }
+                    TokenKind::SquareL => {
+                        let idx = self.parse_expr(c, 0)?;
+                        self.add_expr(Expr::Indexing { src: lhs, idx })
+                    }
+                    TokenKind::Dot => {
+                        let member = self.parse_ident(c, "after struct dot operator")?;
+                        self.add_expr(Expr::Member { src: lhs, member })
+                    }
+                    _ => unreachable!(), // this shouldnt happen! precondition: postfix_lvl returns only these variants
+                };
+
+                continue;
+            }
+
+            if let Some((left_lvl, right_lvl)) = infix_lvl(op.kind) {
+                if left_lvl < prec_lvl {
+                    break;
+                }
+                let op = op.clone();
+                c.advance();
+
+                if c.eat(TokenKind::Question).is_some() {
+                    let first = self.parse_expr(c, 0)?;
+                    c.expect(
+                        TokenKind::Colon,
+                        || "after ternary operator's first value choice",
+                    )?;
+                    let second = self.parse_expr(c, 0)?;
+                    lhs = self.add_expr(Expr::Ternary {
+                        cond: lhs,
+                        first,
+                        second,
+                    });
+                } else {
+                    // TODO: check for assignment here
+
+                    let rhs = self.parse_expr(c, right_lvl)?;
+                    lhs = self.add_expr(Expr::Binary {
+                        op: op.kind,
+                        lhs,
+                        rhs,
+                    });
+                }
+
+                continue;
+            }
+
+            break;
+        }
+
+        Ok(lhs)
+    }
+
+    fn parse_ty_annot(&mut self, c: &mut ParseCursor) -> ParseResult<TyAnnotId> {
+        let tok = c.advance();
+        let ty = match tok.kind {
+            TokenKind::Ident => {
+                let name = self.add_ident(tok);
+
+                let args = if c.eat(TokenKind::Less).is_some() {
+                    self.parse_listing(
+                        c,
+                        TokenKind::Comma,
+                        TokenKind::Great,
+                        |p, c| p.parse_ty_annot(c),
+                        "type annotation generic arguments",
+                    )?
+                } else {
+                    Box::default()
+                };
+
+                let ty = if c.eat(TokenKind::SquareL).is_some() {
+                    let inner = self.add_ty_annot(TyAnnot::Type { name, args });
+                    let size = self.parse_expr(c, 0)?;
+                    c.expect(TokenKind::SquareR, || "in array type annotation")?;
+                    TyAnnot::Array { inner, size }
+                } else {
+                    TyAnnot::Type { name, args }
+                };
+
+                self.add_ty_annot(ty)
+            }
+
+            TokenKind::Fn => {
+                let params = self.parse_listing(
+                    c,
+                    TokenKind::Comma,
+                    TokenKind::ParenR,
+                    |p, c| p.parse_ty_annot(c),
+                    "function annotation params",
+                )?;
+
+                let ret = if c.eat(TokenKind::Arrow).is_some() {
+                    Some(self.parse_ty_annot(c)?)
+                } else {
+                    None
+                };
+
+                self.add_ty_annot(TyAnnot::Func { params, ret })
+            }
+
+            TokenKind::ParenL => {
+                let inner = self.parse_listing(
+                    c,
+                    TokenKind::Comma,
+                    TokenKind::ParenR,
+                    |p, c| p.parse_ty_annot(c),
+                    "tuple type annotation",
+                )?;
+
+                self.add_ty_annot(TyAnnot::Tuple(inner))
+            }
+            _ => return Err(self.err("invalid type annotation", tok)),
+        };
+
+        Ok(ty)
+    }
+
+    fn parse_listing<T, F>(
+        &mut self,
+        c: &mut ParseCursor,
+        separator: TokenKind,
+        terminator: TokenKind,
+        mut getter: F,
+        what: &str,
+    ) -> ParseResult<List<T>>
+    where
+        F: FnMut(&mut Self, &mut ParseCursor) -> ParseResult<T>,
+    {
+        let mut list = Vec::new();
+
+        loop {
+            if c.eat(terminator).is_some() {
+                break;
+            }
+            let item = getter(self, c)?;
+            list.push(item);
+
+            if c.eat(separator).is_none() {
+                // if we don't find a separator, we are expecting a terminator
+                // if we don't get a terminator, it is an error
+                c.expect(terminator, || format!("unclosed listing after {}", what))?;
+                break;
+            }
+        }
+
+        Ok(list.into())
+    }
+
+    fn parse_block(&mut self, c: &mut ParseCursor) -> ParseResult<Block> {
+        let start = StmtId(self.stmts.len() as Id);
+        let start_tok = c.prev().clone();
+
+        let mut is_closed = false;
+        while c.has_some() {
+            if c.eat(TokenKind::BraceR).is_some() {
+                is_closed = true;
+                break;
+            }
+
+            self.parse_stmt(c)?;
+            // match self.parse_stmt(c) {
+            //   Ok(_) =>  {}
+            //   Err(e) => self.report_error(c, e),
+            // }
+        }
+
+        if !is_closed {
+            return Err(self.err("unclosed block starting", &start_tok));
+        }
+
+        let end = StmtId(self.stmts.len() as Id);
+        Ok(Block { start, end })
+    }
+
+    fn parse_var_decl(&mut self, c: &mut ParseCursor) -> ParseResult<StmtId> {
+        let name = self.parse_ident(c, "after let keyword")?;
+
+        let ty = if c.eat(TokenKind::Colon).is_some() {
+            Some(self.parse_ty_annot(c)?)
+        } else {
+            None
+        };
+
+        c.expect(TokenKind::Equal, || "after var declaration's identifier")?;
+        let expr = self.parse_expr(c, 0)?;
+        c.expect_semicolon("var declaration")?;
+
+        let stmt = Stmt::VarDecl(VarContent {
+            name,
+            ty,
+            rhs: expr,
+        });
+        Ok(self.add_stmt(stmt))
+    }
+
+    fn parse_stmt(&mut self, c: &mut ParseCursor) -> ParseResult<StmtId> {
+        let tok = c.advance();
+
+        let id = match tok.kind {
+            TokenKind::Let => self.parse_var_decl(c)?,
+            TokenKind::Return => {
+                let expr = self.parse_expr(c, 0)?;
+                c.expect_semicolon("return")?;
+                let ret = self.add_expr(Expr::Return((expr)));
+                self.add_stmt(Stmt::Expr(ret))
+            }
+
+            TokenKind::Eof => return Err(self.err("reached EOF", tok)),
+
+            _ => {
+                // try to parse expression
+                c.undo();
+                let expr = self.parse_expr(c, 0)?;
+                c.expect_semicolon("expression")?;
+                self.add_stmt(Stmt::Expr(expr))
+            }
+        };
+
+        Ok(id)
+    }
+
+    fn parse_toplvl_stmt(&mut self, c: &mut ParseCursor) -> ParseResult<StmtId> {
+        let tok = c.advance();
+
+        let id = match tok.kind {
+            TokenKind::Let => self.parse_var_decl(c)?,
+
+            TokenKind::Fn => {
+                let name_tok = c.expect(TokenKind::Ident, || "after fn keyword")?;
+                let name = self.add_ident(name_tok);
+
+                let generics = if c.eat(TokenKind::Less).is_some() {
+                    self.parse_listing(
+                        c,
+                        TokenKind::Comma,
+                        TokenKind::Great,
+                        |p, c| p.parse_ident(c, "in function declaration generic params"),
+                        "function declaration generic params",
+                    )?
+                } else {
+                    Box::default()
+                };
+
+                c.expect(TokenKind::ParenL, || "after function declaration name")?;
+                let params = self.parse_listing(
+                    c,
+                    TokenKind::Comma,
+                    TokenKind::ParenR,
+                    |p, c| {
+                        let name = p.parse_ident(c, "in function declaration params")?;
+                        c.expect(TokenKind::Colon, || "after function declaration param name")?;
+                        Ok((name, p.parse_ty_annot(c)?))
+                    },
+                    "function declaration params",
+                )?;
+
+                let ret = if c.eat(TokenKind::Arrow).is_some() {
+                    Some(self.parse_ty_annot(c)?)
+                } else {
+                    None
+                };
+
+                c.expect(TokenKind::BraceL, || "after function declaration signature")?;
+                let code = self.parse_block(c)?;
+
+                self.add_stmt(Stmt::FuncDecl(FuncContent {
+                    name,
+                    generics,
+                    params,
+                    ret,
+                    code,
+                }))
+            }
+
+            TokenKind::Struct => {
+                let name = self.parse_ident(c, "after struct keyword")?;
+
+                let generics = if c.eat(TokenKind::Less).is_some() {
+                    self.parse_listing(
+                        c,
+                        TokenKind::Comma,
+                        TokenKind::Great,
+                        |p, c| p.parse_ident(c, "in struct generic params"),
+                        "struct generic params",
+                    )?
+                } else {
+                    Box::default()
+                };
+
+                c.expect(TokenKind::BraceL, || "after struct declaration name")?;
+                let fields = self.parse_listing(
+                    c,
+                    TokenKind::Comma,
+                    TokenKind::BraceR,
+                    |p, c| {
+                        let name = p.parse_ident(c, "in struct field name")?;
+                        c.expect(TokenKind::Colon, || "after struct field name")?;
+                        Ok((name, p.parse_ty_annot(c)?))
+                    },
+                    "in struct fields list",
+                )?;
+
+                self.add_stmt(Stmt::StructDecl(StructContent {
+                    name,
+                    generics,
+                    fields,
+                }))
+            }
+
+            TokenKind::Eof => Err(self.err("reached EOF", tok))?,
+
+            _ => Err(self.err("invalid top level statement", tok))?,
+        };
+
+        Ok(id)
+    }
+}
+
+struct ParseCursor {
+    tokens: Vec<Token>,
+    pos: u32,
+}
+impl ParseCursor {
+    fn new(tokens: Vec<Token>) -> Self {
+        Self { tokens, pos: 0 }
+    }
+
+    fn peek(&self) -> &Token {
+        // we always at least have the last EOF token, so this cant fail
+        // be careful in eating loops
+        &self.tokens[self.pos as usize]
+    }
+
+    fn prev(&self) -> &Token {
+        &self.tokens[self.pos.saturating_sub(1) as usize]
+    }
+
+    fn check(&self, target: TokenKind) -> bool {
+        self.peek().kind == target
+    }
+
+    fn advance(&mut self) -> &Token {
+        self.pos += 1;
+        self.prev()
+    }
+
+    fn undo(&mut self) {
+        self.pos -= 1;
+    }
+
+    fn eat(&mut self, target: TokenKind) -> Option<&Token> {
+        if self.check(target) {
+            Some(self.advance())
+        } else {
+            None
+        }
+    }
+
+    fn expect<S: Into<String>, M: FnOnce() -> S>(
+        &mut self,
+        target: TokenKind,
+        msg: M,
+    ) -> ParseResult<&Token> {
+        if self.check(target) {
+            Ok(self.advance())
+        } else {
+            let tok = self.peek();
+            let err = ParseError {
+                msg: msg().into(),
+                src: tok.clone(),
+                expected: Some(target),
+            };
+            Err(err)
+        }
+    }
+
+    fn expect_semicolon(&mut self, msg: &str) -> ParseResult<&Token> {
+        self.expect(TokenKind::Semicolon, || {
+            format!("at end of {msg} statement")
+        })
+    }
+
+    fn has_some(&self) -> bool {
+        (self.pos as usize) < self.tokens.len()
+    }
+
+    fn skip_while<F: FnMut(&TokenKind) -> bool>(&mut self, f: F) -> u32 {
+        let len = self.tokens[self.pos as usize..]
+            .iter()
+            .map(|t| t.kind)
+            .take_while(f)
+            .count();
+
+        self.pos += len as u32;
+        len as u32
+    }
+}
+
+pub fn parse(lex: Lexer) -> Parser {
+    let mut p = Parser::new(lex);
+    let tokens = std::mem::take(&mut p.lex.tokens);
+    let mut c = ParseCursor::new(tokens);
+
+    while c.has_some() {
+        match p.parse_toplvl_stmt(&mut c) {
+            Ok(id) => p.toplvl_stmts.push(id),
+            Err(e) => p.report_error(&mut c, e),
+        }
+    }
+
+    p.lex.tokens = std::mem::take(&mut c.tokens);
+    p
+}

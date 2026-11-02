@@ -1,0 +1,4 @@
+/target
+/src_*
+/.git_old
+*.cmb
