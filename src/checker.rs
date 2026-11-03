@@ -1,5 +1,5 @@
 use crate::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // https://www.reddit.com/r/ProgrammingLanguages/comments/v5zwlw/resources_for_building_a_typechecker/
 // https://www.reddit.com/r/ProgrammingLanguages/comments/8kox21/help_implementing_a_type_checker/
@@ -42,6 +42,10 @@ impl Environment {
         self.scopes.last_mut().unwrap().insert(name, ty);
     }
 
+    // TODO: this is dangerous. Every push NEEDS a relative POP or else we risk of gertting unwanted state.
+    // a push operation with a callback that automatically pops after the callback should be ideal
+    // hoewever that requires mutable access to the whole environment struct, currently it is inside the typechecker struct
+    // we would need to extract it from there and pass it separately to every typechker function
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new())
     }
@@ -84,6 +88,7 @@ const PRIMITIVES: &[(Type, TypeId)] = &[
     (Type::Float, FLOAT_ID),
 ];
 
+// TODO: better errors here, should probably be SPANNED
 #[derive(Debug)]
 pub enum TypeErrorKind {
     UndeclaredVar,
@@ -94,19 +99,16 @@ pub enum TypeErrorKind {
     InvalidStmtInGlobal,
     InvalidStmtInBlock,
 
+    DuplicateParamsInFunction,
+    DuplicateFieldsInStruct,
+
     CallingWithWrongType,
     IndexingWithWrongType,
 }
 
-#[derive(Debug)]
-pub struct TypeError {
-    // span: Span,
-    kind: TypeErrorKind,
-}
-impl TypeError {
-    pub fn new(kind: TypeErrorKind) -> Self {
-        Self { kind }
-    }
+type TypeError = Spanned<TypeErrorKind>;
+pub fn tyerr(kind: TypeErrorKind, span: &Span) -> TypeError {
+    (kind, *span)
 }
 
 type TypeResult<T> = Result<T, TypeError>;
@@ -188,8 +190,9 @@ impl Typechecker {
         &self.types[id.0 as usize]
     }
 
-    fn add_annotation_as_type(&mut self, ast: &Ast, annot: TyAnnotId) -> TypeId {
-        let ty = match &ast.get_annot(annot) {
+    fn add_annotation_as_type(&mut self, ast: &Ast, annot_id: TyAnnotId) -> TypeId {
+        let (annot, span) = ast.get_annot(annot_id);
+        let ty = match annot {
             TyAnnot::Type { name, args } => {
                 let str = ast.get_ident(*name);
                 match str {
@@ -242,12 +245,17 @@ impl Typechecker {
         self.add_type(ty)
     }
 
-    fn var_decl(&mut self, ast: &Ast, var: &VarContent, stmt_id: StmtId) -> TypeResult<()> {
+    fn var_decl(
+        &mut self,
+        ast: &Ast,
+        var: &VarContent,
+        stmt_id: StmtId,
+        span: &Span,
+    ) -> TypeResult<()> {
         let final_ty = if let Some(ty_annot) = var.ty {
             let annot_id = self.add_annotation_as_type(ast, ty_annot);
-            self.check(ast, var.rhs, annot_id).map_err(|e| {
-                TypeError::new(TypeErrorKind::WrongAnnotation { cause: Box::new(e) })
-            })?;
+            self.check(ast, var.rhs, annot_id)
+                .map_err(|e| tyerr(TypeErrorKind::WrongAnnotation { cause: Box::new(e) }, span))?;
             annot_id
         } else {
             self.infer(ast, var.rhs)?
@@ -260,7 +268,8 @@ impl Typechecker {
     }
 
     fn global_pass(&mut self, ast: &Ast, stmt_id: StmtId) -> TypeResult<()> {
-        match ast.get_stmt(stmt_id) {
+        let (stmt, span) = ast.get_stmt(stmt_id);
+        match stmt {
             Stmt::FuncDecl(content) => {
                 // add fn type to types list and to global scope
                 let ret = if let Some(ret) = content.ret {
@@ -269,7 +278,11 @@ impl Typechecker {
                     VOID_ID
                 };
 
-                // TODO: check params for duplicates
+                let params_set = content.params.iter().map(|p| p.0).collect::<HashSet<_>>();
+                if params_set.len() != content.params.len() {
+                    return Err(tyerr(TypeErrorKind::DuplicateParamsInFunction, span));
+                }
+
                 let ty = Type::Func {
                     params: content
                         .params
@@ -278,6 +291,7 @@ impl Typechecker {
                         .collect(),
                     ret,
                 };
+
                 let ty_id = self.add_type(ty);
                 self.env.bind(content.name, ty_id);
             }
@@ -292,18 +306,21 @@ impl Typechecker {
     }
 
     fn typecheck(&mut self, ast: &Ast, stmt_id: StmtId) -> TypeResult<()> {
-        match ast.get_stmt(stmt_id) {
-            Stmt::VarDecl(content) => self.var_decl(ast, content, stmt_id)?,
+        let (stmt, span) = ast.get_stmt(stmt_id);
+        match stmt {
+            Stmt::VarDecl(content) => self.var_decl(ast, content, stmt_id, span)?,
 
             Stmt::FuncDecl(content) => {
                 self.env.push_scope();
                 for param in &content.params {
+                    // TODO: THIS IS DONE TWICE! can we only add annotation once?
                     let ty = self.add_annotation_as_type(ast, param.1);
                     self.env.bind(param.0, ty);
                 }
 
                 let ret_actual = self.typecheck_block(ast, &content.code);
                 self.env.pop_scope();
+
                 let ret_actual = ret_actual?;
 
                 let ret_expected = if let Some(ret) = content.ret {
@@ -313,10 +330,13 @@ impl Typechecker {
                 };
 
                 if ret_actual.0 != ret_expected.0 {
-                    let err = TypeError::new(TypeErrorKind::WrongTypecheck {
-                        expected: self.get_type(ret_expected).clone(),
-                        actual: self.get_type(ret_actual).clone(),
-                    });
+                    let err = tyerr(
+                        TypeErrorKind::WrongTypecheck {
+                            expected: self.get_type(ret_expected).clone(),
+                            actual: self.get_type(ret_actual).clone(),
+                        },
+                        span,
+                    );
 
                     Err(err)?
                 }
@@ -325,7 +345,7 @@ impl Typechecker {
             Stmt::StructDecl(_) => {} // Do nothing, already done in toplvl_pass
 
             Stmt::Expr(_) => {
-                let err = TypeError::new(TypeErrorKind::InvalidStmtInGlobal);
+                let err = tyerr(TypeErrorKind::InvalidStmtInGlobal, span);
                 Err(err)?
             }
         }
@@ -338,12 +358,12 @@ impl Typechecker {
 
         for stmt_id in block.start.0..block.end.0 {
             let stmt_id = StmtId(stmt_id);
-            let stmt = ast.get_stmt(stmt_id);
+            let (stmt, span) = ast.get_stmt(stmt_id);
             match stmt {
-                Stmt::VarDecl(content) => self.var_decl(ast, content, stmt_id)?,
+                Stmt::VarDecl(content) => self.var_decl(ast, content, stmt_id, span)?,
 
                 Stmt::Expr(expr_id) => {
-                    let expr = ast.get_expr(*expr_id);
+                    let (expr, _) = ast.get_expr(*expr_id);
 
                     match expr {
                         Expr::Return(expr_id) => match ret_ty {
@@ -362,7 +382,7 @@ impl Typechecker {
                 }
 
                 Stmt::FuncDecl(_) | Stmt::StructDecl(_) => {
-                    let err = TypeError::new(TypeErrorKind::InvalidStmtInBlock);
+                    let err = tyerr(TypeErrorKind::InvalidStmtInBlock, span);
                     Err(err)?
                 }
             };
@@ -373,7 +393,8 @@ impl Typechecker {
     }
 
     fn infer(&mut self, ast: &Ast, expr: ExprId) -> TypeResult<TypeId> {
-        let id = match ast.get_expr(expr) {
+        let (expr, span) = ast.get_expr(expr);
+        let id = match expr {
             Expr::BoolLiteral(_) => BOOL_ID,
             Expr::IntLiteral(_) => INT_ID,
             Expr::FloatLiteral(_) => FLOAT_ID,
@@ -383,7 +404,7 @@ impl Typechecker {
             Expr::Variable(name) => self
                 .env
                 .lookup(*name)
-                .ok_or_else(|| TypeError::new(TypeErrorKind::UndeclaredVar))?,
+                .ok_or_else(|| tyerr(TypeErrorKind::UndeclaredVar, span))?,
 
             Expr::Return(id) => self.infer(ast, *id)?,
 
@@ -417,7 +438,7 @@ impl Typechecker {
                         ret
                     }
 
-                    _ => Err(TypeError::new(TypeErrorKind::CallingWithWrongType))?,
+                    _ => Err(tyerr(TypeErrorKind::CallingWithWrongType, span))?,
                 }
             }
 
@@ -430,7 +451,7 @@ impl Typechecker {
                         // TODO: we might even do constant bound checking here
                         *inner
                     }
-                    _ => Err(TypeError::new(TypeErrorKind::IndexingWithWrongType))?,
+                    _ => Err(tyerr(TypeErrorKind::IndexingWithWrongType, span))?,
                 }
             }
 
@@ -449,23 +470,27 @@ impl Typechecker {
         Ok(id)
     }
 
-    fn check(&mut self, ast: &Ast, expr: ExprId, target: TypeId) -> TypeResult<()> {
-        let res_ty = match ast.get_expr(expr) {
+    fn check(&mut self, ast: &Ast, expr_id: ExprId, target: TypeId) -> TypeResult<()> {
+        let (expr, span) = ast.get_expr(expr_id);
+        let res_ty = match expr {
             Expr::BoolLiteral(_) => BOOL_ID,
             Expr::IntLiteral(_) => INT_ID,
             Expr::FloatLiteral(_) => FLOAT_ID,
 
             _ => {
-                let inferred_ty = self.infer(ast, expr)?;
+                let inferred_ty = self.infer(ast, expr_id)?;
                 inferred_ty
             }
         };
 
         if res_ty.0 != target.0 {
-            let err = TypeError::new(TypeErrorKind::WrongTypecheck {
-                expected: self.get_type(target).clone(),
-                actual: self.get_type(res_ty).clone(),
-            });
+            let err = tyerr(
+                TypeErrorKind::WrongTypecheck {
+                    expected: self.get_type(target).clone(),
+                    actual: self.get_type(res_ty).clone(),
+                },
+                span,
+            );
             Err(err)
         } else {
             Ok(())
@@ -506,7 +531,7 @@ pub fn typecheck(ast: &mut Ast) -> Typechecker {
     // final pass to assign final types to variables declarations
     for (stmt_id, ty_id) in &tc.vars_typed {
         let annot = type_to_annotation(*ty_id, &tc, ast);
-        let stmt = ast.get_stmt_mut(*stmt_id);
+        let (stmt, _) = ast.get_stmt_mut(*stmt_id);
         match stmt {
             Stmt::VarDecl(content) => {
                 content.ty = Some(annot);

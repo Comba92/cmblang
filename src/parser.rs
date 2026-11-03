@@ -88,13 +88,13 @@ pub enum TyAnnot {
     },
     Array {
         inner: TyAnnotId,
-        size: ExprId,
+        size: ExprId, // TODO: to think about this
     },
-    Tuple(List<TyAnnotId>),
     Func {
         params: List<TyAnnotId>,
         ret: Option<TyAnnotId>,
     },
+    Tuple(List<TyAnnotId>),
 }
 
 #[derive(Debug, Clone)]
@@ -186,7 +186,7 @@ pub struct Parser {
 
 impl Parser {
     fn add_ident(&mut self, c: &ParseCursor, tok: &Token) -> IdentId {
-        IdentId(self.idents.add(c.lex.string_tok(tok)))
+        IdentId(self.idents.add(c.lex.str_from_tok(tok)))
     }
 
     fn add_ty_annot(&mut self, ty: TyAnnot, c: &ParseCursor, start: &Token) -> TyAnnotId {
@@ -211,7 +211,7 @@ impl Parser {
     fn report_error(&mut self, c: &mut ParseCursor, e: ParseError) {
         eprintln!(
             "{:?} {:?} {:?} {:?}",
-            c.lex.string_span(&e.1),
+            c.lex.str_from_span(&e.1),
             e.0,
             c.lex.pos_from_offset(e.1.start),
             c.lex.pos_from_offset(e.1.end)
@@ -273,7 +273,7 @@ impl Parser {
             TokenKind::IntNumber => {
                 let num = c
                     .lex
-                    .string_tok(tok)
+                    .str_from_tok(tok)
                     .parse()
                     .map_err(|e| err_tok(ParseErrorKind::IntParseError(e), tok))?;
                 self.add_expr(Expr::IntLiteral(num), c, tok)
@@ -282,7 +282,7 @@ impl Parser {
             TokenKind::FloatNumber => {
                 let num = c
                     .lex
-                    .string_tok(tok)
+                    .str_from_tok(tok)
                     .parse()
                     .map_err(|e| err_tok(ParseErrorKind::FloatParseError(e), tok))?;
                 self.add_expr(Expr::FloatLiteral(num), c, tok)

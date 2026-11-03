@@ -3,6 +3,7 @@ use intern::*;
 
 pub struct Ast {
     pub input: String,
+    // pub lines_offsets: Vec<u32>,
     pub idents: StringInterner,
     pub exprs: Vec<Spanned<Expr>>,
     pub stmts: Vec<Spanned<Stmt>>,
@@ -14,6 +15,7 @@ impl Ast {
     pub fn new(lex: Lexer, parser: Parser) -> Self {
         Self {
             input: lex.input,
+            // lines_offsets: lex.line_offsets,
             idents: parser.idents,
             exprs: parser.exprs,
             stmts: parser.stmts,
@@ -22,26 +24,27 @@ impl Ast {
         }
     }
 
-    pub fn get_expr(&self, expr: ExprId) -> &Expr {
-        &self.exprs[expr.0 as usize].0
+    pub fn get_expr(&self, expr: ExprId) -> &Spanned<Expr> {
+        &self.exprs[expr.0 as usize]
     }
 
-    pub fn get_stmt(&self, stmt: StmtId) -> &Stmt {
-        &self.stmts[stmt.0 as usize].0
+    pub fn get_stmt(&self, stmt: StmtId) -> &Spanned<Stmt> {
+        &self.stmts[stmt.0 as usize]
     }
 
-    pub fn get_stmt_mut(&mut self, id: StmtId) -> &mut Stmt {
-        &mut self.stmts[id.0 as usize].0
+    pub fn get_stmt_mut(&mut self, id: StmtId) -> &mut Spanned<Stmt> {
+        &mut self.stmts[id.0 as usize]
     }
 
     pub fn get_ident(&self, ident: IdentId) -> &str {
         self.idents.get(ident.0)
     }
 
-    pub fn get_annot(&self, annot: TyAnnotId) -> &TyAnnot {
-        &self.annots[annot.0 as usize].0
+    pub fn get_annot(&self, annot: TyAnnotId) -> &Spanned<TyAnnot> {
+        &self.annots[annot.0 as usize]
     }
 
+    // TEMP: needed for typechecker last pass
     pub fn add_ty_annot(&mut self, ty: TyAnnot) -> TyAnnotId {
         let id = self.annots.len();
         self.annots.push((ty, Span { start: 0, end: 0 }));

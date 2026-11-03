@@ -216,11 +216,11 @@ impl Lexer {
         (tok.kind, self.pos_from_tok(tok))
     }
 
-    pub fn string_tok(&self, tok: &Token) -> &str {
-        self.string_span(&tok.span)
+    pub fn str_from_tok(&self, tok: &Token) -> &str {
+        self.str_from_span(&tok.span)
     }
 
-    pub fn string_span(&self, span: &Span) -> &str {
+    pub fn str_from_span(&self, span: &Span) -> &str {
         &self.input[span.start as usize..span.end as usize]
     }
 
@@ -244,8 +244,12 @@ impl Lexer {
         }
     }
 
-    pub fn line_string(&self, pos: &Position) -> &str {
-        &self.input.lines().nth(pos.line as usize - 1).unwrap()
+    pub fn str_line_from_pos(&self, pos: &Position) -> &str {
+        &self
+            .input
+            .lines()
+            .nth(pos.line as usize - 1)
+            .unwrap_or_default()
     }
 }
 

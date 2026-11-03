@@ -16,7 +16,7 @@ pub fn emit(ast: &Ast) -> String {
 }
 
 fn emit_type(annot_id: TyAnnotId, ast: &Ast, output: &mut String) {
-    let annot = ast.get_annot(annot_id);
+    let (annot, _) = ast.get_annot(annot_id);
 
     match annot {
         TyAnnot::Type { name, args } => {
@@ -42,7 +42,7 @@ fn emit_type(annot_id: TyAnnotId, ast: &Ast, output: &mut String) {
 }
 
 fn emit_decl(stmt_id: StmtId, ast: &Ast, output: &mut String) {
-    let stmt = ast.get_stmt(stmt_id);
+    let (stmt, _) = ast.get_stmt(stmt_id);
 
     match stmt {
         Stmt::VarDecl(content) => {
@@ -79,7 +79,7 @@ fn emit_decl(stmt_id: StmtId, ast: &Ast, output: &mut String) {
 }
 
 fn emit_stmt(stmt_id: StmtId, ast: &Ast, output: &mut String) {
-    let stmt = ast.get_stmt(stmt_id);
+    let (stmt, _) = ast.get_stmt(stmt_id);
 
     match stmt {
         Stmt::VarDecl(content) => {
@@ -136,7 +136,7 @@ fn emit_block(block: &Block, ast: &Ast, output: &mut String) {
 }
 
 fn emit_expr(expr_id: ExprId, ast: &Ast, output: &mut String) {
-    let expr = ast.get_expr(expr_id);
+    let (expr, _) = ast.get_expr(expr_id);
 
     match expr {
         Expr::BoolLiteral(b) => output.push(if *b { '1' } else { '0' }),
