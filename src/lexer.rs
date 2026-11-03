@@ -43,8 +43,8 @@ pub enum TokenKind {
     Ident,
     IntNumber,
     FloatNumber,
-    Arrow,
 
+    Arrow,
     // Comparisons
     EqualEq,
     NotEq,
@@ -64,18 +64,21 @@ pub enum TokenKind {
     Let,
     Fn,
     Struct,
+
     If,
     Else,
     While,
     For,
+    Break,
+    Continue,
     Return,
+
     True,
     False,
+
     And,
     Or,
     Not,
-    Break,
-    Continue,
 }
 impl TokenKind {
     pub fn is_op(&self) -> bool {
@@ -86,6 +89,36 @@ impl TokenKind {
             | BraceL | Dot | EqualEq | NotEq | Great | GreatEq | Less | LessEq => true,
             _ => false,
         }
+    }
+
+    pub fn to_c_op(&self) -> Option<&str> {
+        use TokenKind::*;
+
+        let res = match self {
+            Plus => "+",
+            Minus => "-",
+            Star => "*",
+            Slash => "/",
+            Perc => "%",
+            Bang => "!",
+            Amper => "&",
+            Bar => "|",
+            Not => "~",
+            Caret => "^",
+            Equal => "=",
+            Less => ">",
+            Great => "<",
+            EqualEq => "==",
+            NotEq => "!=",
+            LessEq => "<=",
+            GreatEq => ">=",
+            And => "&&",
+            Or => "||",
+            Arrow => "->",
+            _ => return None,
+        };
+
+        Some(res)
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::parser::*;
+use crate::*;
 use std::collections::HashMap;
 
 // https://www.reddit.com/r/ProgrammingLanguages/comments/v5zwlw/resources_for_building_a_typechecker/
@@ -52,7 +52,7 @@ impl Environment {
 }
 
 #[derive(Debug, Clone)]
-enum Type {
+pub enum Type {
     Void,
     Integer,
     Float,
@@ -85,7 +85,7 @@ const PRIMITIVES: &[(Type, TypeId)] = &[
 ];
 
 #[derive(Debug)]
-enum TypeErrorKind {
+pub enum TypeErrorKind {
     UndeclaredVar,
     WrongAnnotation { cause: Box<TypeError> },
     WrongTypecheck { expected: Type, actual: Type },
@@ -99,7 +99,7 @@ enum TypeErrorKind {
 }
 
 #[derive(Debug)]
-struct TypeError {
+pub struct TypeError {
     // span: Span,
     kind: TypeErrorKind,
 }
@@ -111,10 +111,11 @@ impl TypeError {
 
 type TypeResult<T> = Result<T, TypeError>;
 
-struct Typechecker {
+pub struct Typechecker {
     env: Environment,
     types: Vec<Type>,
-    errors: Vec<TypeError>,
+    vars_typed: Vec<(StmtId, TypeId)>,
+    pub errors: Vec<TypeError>,
 }
 
 impl Default for Typechecker {
@@ -122,9 +123,58 @@ impl Default for Typechecker {
         Self {
             env: Environment::default(),
             types: PRIMITIVES.iter().map(|x| x.0.clone()).collect(),
+            vars_typed: vec![],
             errors: vec![],
         }
     }
+}
+
+fn type_to_annotation(ty_id: TypeId, tc: &Typechecker, ast: &mut Ast) -> TyAnnotId {
+    let annot = match tc.get_type(ty_id) {
+        Type::Void => TyAnnot::Type {
+            name: IdentId(ast.idents.add("void")),
+            args: Default::default(),
+        },
+
+        Type::Integer => TyAnnot::Type {
+            name: IdentId(ast.idents.add("int")),
+            args: Default::default(),
+        },
+
+        Type::Float => TyAnnot::Type {
+            name: IdentId(ast.idents.add("float")),
+            args: Default::default(),
+        },
+
+        Type::Bool => TyAnnot::Type {
+            name: IdentId(ast.idents.add("int")), // we treat bools as ints in C
+            args: Default::default(),
+        },
+
+        Type::Array { inner, size } => TyAnnot::Array {
+            inner: type_to_annotation(*inner, tc, ast),
+            size: todo!("array types not implemented yet"),
+        },
+
+        Type::Func { params, ret } => {
+            let list = Vec::new();
+            for param in params {
+                type_to_annotation(*param, tc, ast);
+            }
+
+            let ret = type_to_annotation(*ret, tc, ast);
+
+            TyAnnot::Func {
+                params: list.into(),
+                ret: Some(ret),
+            }
+        }
+
+        Type::Struct { name, fields } => todo!("structs not implemented yet"),
+        Type::Tuple(list) => todo!("tuple not implemented yet"),
+    };
+
+    ast.add_ty_annot(annot)
 }
 
 impl Typechecker {
@@ -138,8 +188,8 @@ impl Typechecker {
         &self.types[id.0 as usize]
     }
 
-    fn add_annotation_as_type(&mut self, ast: &Parser, annot: TyAnnotId) -> TypeId {
-        let ty = match &ast.types[annot.0 as usize] {
+    fn add_annotation_as_type(&mut self, ast: &Ast, annot: TyAnnotId) -> TypeId {
+        let ty = match &ast.get_annot(annot) {
             TyAnnot::Type { name, args } => {
                 let str = ast.get_ident(*name);
                 match str {
@@ -192,39 +242,7 @@ impl Typechecker {
         self.add_type(ty)
     }
 
-    fn global_pass(&mut self, ast: &Parser) {
-        for stmt_id in &ast.global_stmts {
-            let stmt = ast.get_stmt(*stmt_id);
-            match stmt {
-                Stmt::FuncDecl(content) => {
-                    // add fn type to types list and to global scope
-                    let ret = if let Some(ret) = content.ret {
-                        self.add_annotation_as_type(ast, ret)
-                    } else {
-                        VOID_ID
-                    };
-
-                    let ty = Type::Func {
-                        params: content
-                            .params
-                            .iter()
-                            .map(|p| self.add_annotation_as_type(ast, p.1))
-                            .collect(),
-                        ret,
-                    };
-                    let ty_id = self.add_type(ty);
-                    self.env.bind(content.name, ty_id);
-                }
-
-                Stmt::StructDecl(content) => {
-                    todo!("structs not implemented: add struct type to types list")
-                }
-                _ => {}
-            }
-        }
-    }
-
-    fn var_decl(&mut self, ast: &Parser, var: &VarContent) -> TypeResult<()> {
+    fn var_decl(&mut self, ast: &Ast, var: &VarContent, stmt_id: StmtId) -> TypeResult<()> {
         let final_ty = if let Some(ty_annot) = var.ty {
             let annot_id = self.add_annotation_as_type(ast, ty_annot);
             self.check(ast, var.rhs, annot_id).map_err(|e| {
@@ -236,12 +254,46 @@ impl Typechecker {
         };
 
         self.env.bind(var.name, final_ty);
+        self.vars_typed.push((stmt_id, final_ty));
+
         Ok(())
     }
 
-    fn typecheck(&mut self, ast: &Parser, stmt_id: StmtId) -> TypeResult<()> {
+    fn global_pass(&mut self, ast: &Ast, stmt_id: StmtId) -> TypeResult<()> {
         match ast.get_stmt(stmt_id) {
-            Stmt::VarDecl(content) => self.var_decl(ast, content)?,
+            Stmt::FuncDecl(content) => {
+                // add fn type to types list and to global scope
+                let ret = if let Some(ret) = content.ret {
+                    self.add_annotation_as_type(ast, ret)
+                } else {
+                    VOID_ID
+                };
+
+                // TODO: check params for duplicates
+                let ty = Type::Func {
+                    params: content
+                        .params
+                        .iter()
+                        .map(|p| self.add_annotation_as_type(ast, p.1))
+                        .collect(),
+                    ret,
+                };
+                let ty_id = self.add_type(ty);
+                self.env.bind(content.name, ty_id);
+            }
+
+            Stmt::StructDecl(content) => {
+                todo!("structs not implemented: add struct type to types list")
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    fn typecheck(&mut self, ast: &Ast, stmt_id: StmtId) -> TypeResult<()> {
+        match ast.get_stmt(stmt_id) {
+            Stmt::VarDecl(content) => self.var_decl(ast, content, stmt_id)?,
 
             Stmt::FuncDecl(content) => {
                 self.env.push_scope();
@@ -252,6 +304,7 @@ impl Typechecker {
 
                 let ret_actual = self.typecheck_block(ast, &content.code);
                 self.env.pop_scope();
+                let ret_actual = ret_actual?;
 
                 let ret_expected = if let Some(ret) = content.ret {
                     self.add_annotation_as_type(ast, ret)
@@ -259,7 +312,6 @@ impl Typechecker {
                     VOID_ID
                 };
 
-                let ret_actual = ret_actual?;
                 if ret_actual.0 != ret_expected.0 {
                     let err = TypeError::new(TypeErrorKind::WrongTypecheck {
                         expected: self.get_type(ret_expected).clone(),
@@ -281,22 +333,27 @@ impl Typechecker {
         Ok(())
     }
 
-    fn typecheck_block(&mut self, ast: &Parser, block: &Block) -> TypeResult<TypeId> {
-        let mut ty = None;
+    fn typecheck_block(&mut self, ast: &Ast, block: &Block) -> TypeResult<TypeId> {
+        let mut ret_ty = None;
+
         for stmt_id in block.start.0..block.end.0 {
-            let stmt = ast.get_stmt(StmtId(stmt_id));
+            let stmt_id = StmtId(stmt_id);
+            let stmt = ast.get_stmt(stmt_id);
             match stmt {
-                Stmt::VarDecl(content) => self.var_decl(ast, content)?,
+                Stmt::VarDecl(content) => self.var_decl(ast, content, stmt_id)?,
 
                 Stmt::Expr(expr_id) => {
                     let expr = ast.get_expr(*expr_id);
+
                     match expr {
-                        Expr::Return(expr_id) => match ty {
+                        Expr::Return(expr_id) => match ret_ty {
                             None => {
-                                ty = Some(self.infer(ast, *expr_id)?);
+                                // we found the first return epxr.
+                                ret_ty = Some(self.infer(ast, *expr_id)?);
                             }
-                            Some(other_ty) => {
-                                self.check(ast, *expr_id, other_ty)?;
+                            Some(found_ret_ty) => {
+                                // we found another return expr. all other return statement should have the same type as the first.
+                                self.check(ast, *expr_id, found_ret_ty)?;
                             }
                         },
 
@@ -311,14 +368,17 @@ impl Typechecker {
             };
         }
 
-        Ok(ty.unwrap_or(VOID_ID))
+        // if we didn't find any return types, this block has type void
+        Ok(ret_ty.unwrap_or(VOID_ID))
     }
 
-    fn infer(&mut self, ast: &Parser, expr: ExprId) -> TypeResult<TypeId> {
+    fn infer(&mut self, ast: &Ast, expr: ExprId) -> TypeResult<TypeId> {
         let id = match ast.get_expr(expr) {
             Expr::BoolLiteral(_) => BOOL_ID,
             Expr::IntLiteral(_) => INT_ID,
             Expr::FloatLiteral(_) => FLOAT_ID,
+
+            Expr::Grouping(expr) => self.infer(ast, *expr)?,
 
             Expr::Variable(name) => self
                 .env
@@ -327,6 +387,7 @@ impl Typechecker {
 
             Expr::Return(id) => self.infer(ast, *id)?,
 
+            // TODO: right now, no way to check if operand amits the operation between types
             Expr::Unary { op, rhs } => self.infer(ast, *rhs)?,
             Expr::Binary { op, lhs, rhs } => {
                 let lhs_ty = self.infer(ast, *lhs)?;
@@ -388,7 +449,7 @@ impl Typechecker {
         Ok(id)
     }
 
-    fn check(&mut self, ast: &Parser, expr: ExprId, target: TypeId) -> TypeResult<()> {
+    fn check(&mut self, ast: &Ast, expr: ExprId, target: TypeId) -> TypeResult<()> {
         let res_ty = match ast.get_expr(expr) {
             Expr::BoolLiteral(_) => BOOL_ID,
             Expr::IntLiteral(_) => INT_ID,
@@ -412,16 +473,12 @@ impl Typechecker {
     }
 }
 
-pub fn typecheck(ast: Parser) {
-    // first pass: gather top level symbols (struct definitions and function signatures)
-    // second pass, global variables and scan funtion bodies
-
+pub fn typecheck(ast: &mut Ast) -> Typechecker {
     let mut tc = Typechecker::default();
-    tc.global_pass(&ast);
 
-    let mut iter = ast.global_stmts.iter(); // TODO should iter toplvl array here
-    while let Some(stmt_id) = iter.next() {
-        match tc.typecheck(&ast, *stmt_id) {
+    // first pass: gather top level symbols (struct definitions and function signatures)
+    for stmt in &ast.global_stmts {
+        match tc.global_pass(ast, *stmt) {
             Ok(_) => {}
             Err(e) => {
                 eprintln!("{e:?}");
@@ -429,4 +486,34 @@ pub fn typecheck(ast: Parser) {
             }
         }
     }
+
+    // second pass, global variables and scan funtion bodies
+    // typecheck expression blocks
+    for stmt in &ast.global_stmts {
+        match tc.typecheck(ast, *stmt) {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("{e:?}");
+                tc.errors.push(e);
+            }
+        }
+    }
+
+    if !tc.errors.is_empty() {
+        return tc;
+    }
+
+    // final pass to assign final types to variables declarations
+    for (stmt_id, ty_id) in &tc.vars_typed {
+        let annot = type_to_annotation(*ty_id, &tc, ast);
+        let stmt = ast.get_stmt_mut(*stmt_id);
+        match stmt {
+            Stmt::VarDecl(content) => {
+                content.ty = Some(annot);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    tc
 }

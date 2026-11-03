@@ -33,6 +33,8 @@ pub enum Expr {
     BoolLiteral(bool),
     // ArrayLiteral(List<ExprId>),
     Variable(IdentId),
+    Grouping(ExprId),
+
     // Assign { lhs: ExprId, rhs: ExprId },
     Return(ExprId),
 
@@ -79,6 +81,7 @@ impl Expr {
 
 #[derive(Debug)]
 pub enum TyAnnot {
+    // Void,
     Type {
         name: IdentId,
         args: List<TyAnnotId>,
@@ -204,18 +207,6 @@ impl Parser {
         ExprId(id as Id)
     }
 
-    pub fn get_expr(&self, expr: ExprId) -> &Expr {
-        &self.exprs[expr.0 as usize].0
-    }
-
-    pub fn get_stmt(&self, stmt: StmtId) -> &Stmt {
-        &self.stmts[stmt.0 as usize].0
-    }
-
-    pub fn get_ident(&self, ident: IdentId) -> &str {
-        self.idents.get(ident.0)
-    }
-
     // TODO: do recover inside here
     fn report_error(&mut self, c: &mut ParseCursor, e: ParseError) {
         eprintln!(
@@ -320,7 +311,7 @@ impl Parser {
                     &[TokenKind::Semicolon],
                     || "expression parenthesis grouping",
                 )?;
-                lhs
+                self.add_expr(Expr::Grouping(lhs), c, tok)
             }
 
             TokenKind::BraceL => {

@@ -1,10 +1,13 @@
-// pub mod checker;
+pub mod ast;
+pub mod checker;
 pub mod emitter;
 mod intern;
 pub mod lexer;
 pub mod parser;
 
-// pub use checker::*;
+pub use ast::*;
+pub use checker::*;
+pub use emitter::*;
 pub use lexer::*;
 pub use parser::*;
 
