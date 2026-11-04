@@ -37,13 +37,20 @@ impl StringInterner {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct Interner<T> {
     hash_to_id: HashMap<u64, u32>,
     id_to_value: Vec<T>,
 }
 
 impl<T: hash::Hash> Interner<T> {
+    pub fn new() -> Self {
+        Self {
+            hash_to_id: HashMap::new(),
+            id_to_value: Vec::new(),
+        }
+    }
+
     pub fn add(&mut self, val: T) -> u32 {
         let hash = hash(&val);
         if let Some(id) = self.hash_to_id.get(&hash) {

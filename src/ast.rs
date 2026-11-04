@@ -2,8 +2,7 @@ use crate::*;
 use intern::*;
 
 pub struct Ast {
-    pub input: String,
-    // pub lines_offsets: Vec<u32>,
+    pub lex: Lexer,
     pub idents: StringInterner,
     pub exprs: Vec<Spanned<Expr>>,
     pub stmts: Vec<Spanned<Stmt>>,
@@ -14,8 +13,7 @@ pub struct Ast {
 impl Ast {
     pub fn new(lex: Lexer, parser: Parser) -> Self {
         Self {
-            input: lex.input,
-            // lines_offsets: lex.line_offsets,
+            lex,
             idents: parser.idents,
             exprs: parser.exprs,
             stmts: parser.stmts,

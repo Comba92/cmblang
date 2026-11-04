@@ -1,4 +1,4 @@
-use crate::*;
+use crate::{intern::*, *};
 use std::collections::{HashMap, HashSet};
 
 // https://www.reddit.com/r/ProgrammingLanguages/comments/v5zwlw/resources_for_building_a_typechecker/
@@ -9,8 +9,9 @@ use std::collections::{HashMap, HashSet};
 // https://ettolrach.com/blog/bidirectional_inference.html
 // https://thunderseethe.dev/posts/how-to-choose-between-hm-and-bidir/
 // https://thunderseethe.dev/posts/bidirectional-constraint-generation/
+// https://smallcultfollowing.com/babysteps/blog/2017/03/25/unification-in-chalk-part-1/
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Hash)]
 struct TypeId(pub Id);
 type Scope = HashMap<IdentId, TypeId>;
 struct Environment {
@@ -38,6 +39,7 @@ impl Environment {
         self.scopes.first().unwrap().get(&name).copied()
     }
 
+    // TODO: check if value already exists
     fn bind(&mut self, name: IdentId, ty: TypeId) {
         self.scopes.last_mut().unwrap().insert(name, ty);
     }
@@ -55,7 +57,7 @@ impl Environment {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash)]
 pub enum Type {
     Void,
     Integer,
@@ -100,7 +102,9 @@ pub enum TypeErrorKind {
     InvalidStmtInBlock,
 
     DuplicateParamsInFunction,
+    DuplicateGenericsInFunction,
     DuplicateFieldsInStruct,
+    DuplicateGenericsInStruct,
 
     CallingWithWrongType,
     IndexingWithWrongType,
@@ -113,18 +117,40 @@ pub fn tyerr(kind: TypeErrorKind, span: &Span) -> TypeError {
 
 type TypeResult<T> = Result<T, TypeError>;
 
+#[derive(Default)]
+struct Inference {
+    ty_var_count: u32,
+    constraints: Vec<(TypeId, TypeId)>,
+}
+impl Inference {
+    fn fresh_ty_var(&mut self) -> u32 {
+        let res = self.ty_var_count;
+        self.ty_var_count += 1;
+        res
+    }
+}
+
 pub struct Typechecker {
     env: Environment,
-    types: Vec<Type>,
+    types: Interner<Type>,
+    unify: Inference,
+
     vars_typed: Vec<(StmtId, TypeId)>,
     pub errors: Vec<TypeError>,
 }
 
 impl Default for Typechecker {
     fn default() -> Self {
+        let mut types = Interner::new();
+        for primitive in PRIMITIVES {
+            let id = types.add(primitive.0.clone());
+            debug_assert_eq!(id, primitive.1.0);
+        }
+
         Self {
             env: Environment::default(),
-            types: PRIMITIVES.iter().map(|x| x.0.clone()).collect(),
+            types,
+            unify: Default::default(),
             vars_typed: vec![],
             errors: vec![],
         }
@@ -181,13 +207,26 @@ fn type_to_annotation(ty_id: TypeId, tc: &Typechecker, ast: &mut Ast) -> TyAnnot
 
 impl Typechecker {
     fn add_type(&mut self, ty: Type) -> TypeId {
-        let id = self.types.len();
-        self.types.push(ty);
+        // let id = self.types.len();
+        // self.types.push(ty);
+        let id = self.types.add(ty);
         TypeId(id as Id)
     }
 
     fn get_type(&self, id: TypeId) -> &Type {
-        &self.types[id.0 as usize]
+        // &self.types[id.0 as usize]
+        self.types.get(id.0)
+    }
+
+    fn report_error(&mut self, ast: &Ast, e: TypeError) {
+        eprintln!(
+            "{:?} {:?} {:?} {:?}",
+            ast.lex.str_from_span(&e.1),
+            e.0,
+            ast.lex.pos_from_offset(e.1.start),
+            ast.lex.pos_from_offset(e.1.end)
+        );
+        self.errors.push(e);
     }
 
     fn add_annotation_as_type(&mut self, ast: &Ast, annot_id: TyAnnotId) -> TypeId {
@@ -271,6 +310,8 @@ impl Typechecker {
         let (stmt, span) = ast.get_stmt(stmt_id);
         match stmt {
             Stmt::FuncDecl(content) => {
+                // TODO: should check if fn name already exists
+
                 // add fn type to types list and to global scope
                 let ret = if let Some(ret) = content.ret {
                     self.add_annotation_as_type(ast, ret)
@@ -312,33 +353,40 @@ impl Typechecker {
 
             Stmt::FuncDecl(content) => {
                 self.env.push_scope();
-                for param in &content.params {
-                    // TODO: THIS IS DONE TWICE! can we only add annotation once?
-                    let ty = self.add_annotation_as_type(ast, param.1);
-                    self.env.bind(param.0, ty);
-                }
 
-                let ret_actual = self.typecheck_block(ast, &content.code);
-                self.env.pop_scope();
+                let func = self.env.lookup(content.name).expect(
+                    "function should already be in global scope after name resolution pass",
+                );
+                match self.get_type(func).clone() {
+                    Type::Func {
+                        params,
+                        ret: ret_expected,
+                    } => {
+                        for (param_ty, param_content) in params.iter().zip(content.params.iter()) {
+                            self.env.bind(param_content.0, *param_ty);
+                        }
 
-                let ret_actual = ret_actual?;
+                        let ret_actual = self.typecheck_block(ast, &content.code);
+                        self.env.pop_scope();
 
-                let ret_expected = if let Some(ret) = content.ret {
-                    self.add_annotation_as_type(ast, ret)
-                } else {
-                    VOID_ID
-                };
+                        let ret_actual = ret_actual?;
 
-                if ret_actual.0 != ret_expected.0 {
-                    let err = tyerr(
-                        TypeErrorKind::WrongTypecheck {
-                            expected: self.get_type(ret_expected).clone(),
-                            actual: self.get_type(ret_actual).clone(),
-                        },
-                        span,
-                    );
+                        if ret_actual.0 != ret_expected.0 {
+                            let err = tyerr(
+                                TypeErrorKind::WrongTypecheck {
+                                    expected: self.get_type(ret_expected).clone(),
+                                    actual: self.get_type(ret_actual).clone(),
+                                },
+                                span,
+                            );
 
-                    Err(err)?
+                            Err(err)?
+                        }
+                    }
+
+                    _ => unreachable!(
+                        "function type should already be in global scope after name resolution pass"
+                    ),
                 }
             }
 
@@ -470,8 +518,9 @@ impl Typechecker {
         Ok(id)
     }
 
-    fn check(&mut self, ast: &Ast, expr_id: ExprId, target: TypeId) -> TypeResult<()> {
+    fn check(&mut self, ast: &Ast, expr_id: ExprId, expected_ty_id: TypeId) -> TypeResult<()> {
         let (expr, span) = ast.get_expr(expr_id);
+
         let res_ty = match expr {
             Expr::BoolLiteral(_) => BOOL_ID,
             Expr::IntLiteral(_) => INT_ID,
@@ -479,14 +528,17 @@ impl Typechecker {
 
             _ => {
                 let inferred_ty = self.infer(ast, expr_id)?;
+                self.unify.constraints.push((expected_ty_id, inferred_ty));
+
                 inferred_ty
             }
         };
 
-        if res_ty.0 != target.0 {
+        // types are interned so hopefully this is enough to check them
+        if res_ty.0 != expected_ty_id.0 {
             let err = tyerr(
                 TypeErrorKind::WrongTypecheck {
-                    expected: self.get_type(target).clone(),
+                    expected: self.get_type(expected_ty_id).clone(),
                     actual: self.get_type(res_ty).clone(),
                 },
                 span,
@@ -505,10 +557,7 @@ pub fn typecheck(ast: &mut Ast) -> Typechecker {
     for stmt in &ast.global_stmts {
         match tc.global_pass(ast, *stmt) {
             Ok(_) => {}
-            Err(e) => {
-                eprintln!("{e:?}");
-                tc.errors.push(e);
-            }
+            Err(e) => tc.report_error(ast, e),
         }
     }
 
@@ -517,12 +566,12 @@ pub fn typecheck(ast: &mut Ast) -> Typechecker {
     for stmt in &ast.global_stmts {
         match tc.typecheck(ast, *stmt) {
             Ok(_) => {}
-            Err(e) => {
-                eprintln!("{e:?}");
-                tc.errors.push(e);
-            }
+            Err(e) => tc.report_error(ast, e),
         }
     }
+
+    println!("{:?}", tc.types);
+    println!("{:?}", tc.unify.constraints);
 
     if !tc.errors.is_empty() {
         return tc;
