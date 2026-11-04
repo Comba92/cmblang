@@ -63,6 +63,8 @@ pub enum Type {
     Integer,
     Float,
     Bool,
+    Generic(u32, IdentId), // TODO: change this to be func: IdentId, name: IdentId,
+    TypeVar(u32),
     Array {
         inner: TypeId,
         size: u32,
@@ -179,6 +181,13 @@ fn type_to_annotation(ty_id: TypeId, tc: &Typechecker, ast: &mut Ast) -> TyAnnot
             args: Default::default(),
         },
 
+        Type::Generic(_, name) => TyAnnot::Type {
+            name: *name,
+            args: Default::default(),
+        },
+
+        Type::TypeVar(u32) => unreachable!("can't convert a type var to a type annotation"),
+
         Type::Array { inner, size } => TyAnnot::Array {
             inner: type_to_annotation(*inner, tc, ast),
             size: todo!("array types not implemented yet"),
@@ -213,6 +222,13 @@ impl Typechecker {
         TypeId(id as Id)
     }
 
+    fn add_ty_var(&mut self) -> TypeId {
+        let id = self
+            .types
+            .add(Type::Generic(self.unify.fresh_ty_var(), IdentId(0)));
+        TypeId(id as Id)
+    }
+
     fn get_type(&self, id: TypeId) -> &Type {
         // &self.types[id.0 as usize]
         self.types.get(id.0)
@@ -230,15 +246,32 @@ impl Typechecker {
     }
 
     fn add_annotation_as_type(&mut self, ast: &Ast, annot_id: TyAnnotId) -> TypeId {
+        self.add_annotation_as_type_with_generics(ast, annot_id, &[])
+    }
+
+    fn add_annotation_as_type_with_generics(
+        &mut self,
+        ast: &Ast,
+        annot_id: TyAnnotId,
+        generics: &[(IdentId, TypeId)],
+    ) -> TypeId {
         let (annot, span) = ast.get_annot(annot_id);
         let ty = match annot {
             TyAnnot::Type { name, args } => {
-                let str = ast.get_ident(*name);
-                match str {
-                    "bool" => return BOOL_ID,
-                    "int" => return INT_ID,
-                    "float" => return FLOAT_ID,
-                    _ => todo!("user defined types not implemented"),
+                if let Some(generic) = generics.iter().find(|g| g.0 == *name) {
+                    if !args.is_empty() {
+                        todo!("error, generic type variables can't have generic args")
+                    }
+
+                    return generic.1;
+                } else {
+                    let str = ast.get_ident(*name);
+                    match str {
+                        "bool" => return BOOL_ID,
+                        "int" => return INT_ID,
+                        "float" => return FLOAT_ID,
+                        _ => todo!("user defined types not implemented"),
+                    }
                 }
             }
 
@@ -312,23 +345,36 @@ impl Typechecker {
             Stmt::FuncDecl(content) => {
                 // TODO: should check if fn name already exists
 
+                if has_duplicates(&content.generics, |g| *g) {
+                    return Err(tyerr(TypeErrorKind::DuplicateGenericsInFunction, span));
+                }
+
+                if has_duplicates(&content.params, |p| p.0) {
+                    return Err(tyerr(TypeErrorKind::DuplicateParamsInFunction, span));
+                }
+
+                // TODO: temporary solution
+                let generics: Vec<_> = content
+                    .generics
+                    .iter()
+                    .map(|g| {
+                        let ty_var = Type::Generic(self.unify.fresh_ty_var(), *g);
+                        (*g, self.add_type(ty_var))
+                    })
+                    .collect();
+
                 // add fn type to types list and to global scope
                 let ret = if let Some(ret) = content.ret {
-                    self.add_annotation_as_type(ast, ret)
+                    self.add_annotation_as_type_with_generics(ast, ret, &generics)
                 } else {
                     VOID_ID
                 };
-
-                let params_set = content.params.iter().map(|p| p.0).collect::<HashSet<_>>();
-                if params_set.len() != content.params.len() {
-                    return Err(tyerr(TypeErrorKind::DuplicateParamsInFunction, span));
-                }
 
                 let ty = Type::Func {
                     params: content
                         .params
                         .iter()
-                        .map(|p| self.add_annotation_as_type(ast, p.1))
+                        .map(|p| self.add_annotation_as_type_with_generics(ast, p.1, &generics))
                         .collect(),
                     ret,
                 };
@@ -481,7 +527,13 @@ impl Typechecker {
                         // we must clone to both access params and do check
 
                         for (param, arg) in params.iter().zip(args.iter()) {
-                            self.check(ast, *arg, *param)?;
+                            match self.get_type(*param) {
+                                Type::Generic(_, _) => {
+                                    let ty_var = self.add_ty_var();
+                                    self.check(ast, *arg, ty_var)?
+                                }
+                                _ => self.check(ast, *arg, *param)?,
+                            }
                         }
                         ret
                     }
@@ -518,32 +570,32 @@ impl Typechecker {
         Ok(id)
     }
 
-    fn check(&mut self, ast: &Ast, expr_id: ExprId, expected_ty_id: TypeId) -> TypeResult<()> {
+    fn check(&mut self, ast: &Ast, expr_id: ExprId, expected_ty: TypeId) -> TypeResult<()> {
         let (expr, span) = ast.get_expr(expr_id);
 
-        let res_ty = match expr {
+        let inferred_ty = match expr {
             Expr::BoolLiteral(_) => BOOL_ID,
             Expr::IntLiteral(_) => INT_ID,
             Expr::FloatLiteral(_) => FLOAT_ID,
-
             _ => {
                 let inferred_ty = self.infer(ast, expr_id)?;
-                self.unify.constraints.push((expected_ty_id, inferred_ty));
-
                 inferred_ty
             }
         };
 
         // types are interned so hopefully this is enough to check them
-        if res_ty.0 != expected_ty_id.0 {
-            let err = tyerr(
-                TypeErrorKind::WrongTypecheck {
-                    expected: self.get_type(expected_ty_id).clone(),
-                    actual: self.get_type(res_ty).clone(),
-                },
-                span,
-            );
-            Err(err)
+        if inferred_ty.0 != expected_ty.0 {
+            self.unify.constraints.push((inferred_ty, expected_ty));
+
+            // let err = tyerr(
+            //     TypeErrorKind::WrongTypecheck {
+            //         expected: self.get_type(expected_ty_id).clone(),
+            //         actual: self.get_type(inferred_ty).clone(),
+            //     },
+            //     span,
+            // );
+            // Err(err)
+            Ok(())
         } else {
             Ok(())
         }

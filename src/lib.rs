@@ -11,6 +11,15 @@ pub use emitter::*;
 pub use lexer::*;
 pub use parser::*;
 
+fn has_duplicates<A, B, M>(list: &[A], map: M) -> bool
+where
+    B: Eq + std::hash::Hash,
+    M: FnMut(&A) -> B,
+{
+    let set: std::collections::HashSet<_> = list.iter().map(map).collect();
+    set.len() != list.len()
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Span {
     pub start: u32,

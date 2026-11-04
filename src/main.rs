@@ -27,8 +27,8 @@ fn main() {
     let mut ast = Ast::new(lex, parser);
     let checker = typecheck(&mut ast);
 
-    let output = emit(&ast);
-    println!("{output}");
+    // let output = emit(&ast);
+    // println!("{output}");
 
     // for line in io::stdin().lines() {
     //   match line {
