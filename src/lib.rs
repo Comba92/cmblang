@@ -46,22 +46,110 @@ pub struct Position {
 }
 pub type Positioned<T> = (T, Position);
 
-// trait CursorIter<Inner> {
-//   fn peek(&self) -> Inner { self.peek_nth(0) }
-//   fn peek_nth(&self, nth: usize) -> Inner;
-//   fn advance(&mut self) { self.advance_nth(1); }
-//   fn advance_nth(&mut self, n: usize) { *self.curr_mut() += n as u32; }
-//   fn undo(&mut self) { *self.curr_mut() = self.curr().saturating_sub(1); }
-//
-//   fn eat(&mut self) -> Inner {
-//     let res = self.peek();
-//     self.advance();
-//     res
-//   }
-//
-//   fn start(&self) -> &[Inner];
-//   fn slice(&self) -> &[Inner] { &self.start()[self.curr() as usize..] }
-//   fn curr(&self) -> u32;
-//   fn curr_mut(&mut self) -> &mut u32;
-//   fn has_some(&self) -> bool { self.curr() < self.start().len() as u32 }
-// }
+pub mod UnionFind {
+    #[derive(Default)]
+    pub struct UfNode<T> {
+        pub payload: T,
+        parent: u32,
+        size: u32,
+    }
+
+    #[derive(Default)]
+    pub struct UnionFind<T> {
+        forest: Vec<UfNode<T>>,
+    }
+    impl<T: Eq> UnionFind<T> {
+        pub fn new() -> Self {
+            Self { forest: vec![] }
+        }
+
+        fn search_idx(&self, val: &T) -> Option<usize> {
+            self.forest.iter().position(|x| x.payload == *val)
+        }
+
+        pub fn make_set(&mut self, val: T) -> u32 {
+            match self.search_idx(&val) {
+                Some(idx) => idx as u32,
+                None => {
+                    let id = self.forest.len() as u32;
+                    self.forest.push(UfNode {
+                        parent: id,
+                        payload: val,
+                        size: 1,
+                    });
+                    id
+                }
+            }
+        }
+
+        pub fn find(&mut self, val: &T) -> Option<&UfNode<T>> {
+            if let Some(node_id) = self.search_idx(val) {
+                let id = self.find_idx(node_id as u32);
+                Some(&self.forest[id as usize])
+            } else {
+                None
+            }
+        }
+
+        fn get(&self, idx: u32) -> &UfNode<T> {
+            &self.forest[idx as usize]
+        }
+
+        fn get_mut(&mut self, idx: u32) -> &mut UfNode<T> {
+            &mut self.forest[idx as usize]
+        }
+
+        // implemented with path compression
+        fn find_idx(&mut self, node_id: u32) -> u32 {
+            let parent_id = self.get(node_id).parent;
+
+            if parent_id == node_id {
+                // if its representative return
+                node_id
+            } else {
+                // else go up to the parent recursively
+                let new_parent_id = self.find_idx(parent_id);
+                let node = self.get_mut(node_id);
+                node.parent = new_parent_id;
+                node_id
+            }
+        }
+
+        pub fn union(&mut self, x: &T, y: &T) -> bool {
+            let x_idx = self.search_idx(x);
+            let y_idx = self.search_idx(y);
+
+            match (x_idx, y_idx) {
+                (Some(x), Some(y)) => {
+                    self.union_idx(x as u32, y as u32);
+                    true
+                }
+                _ => false,
+            }
+        }
+
+        fn union_idx(&mut self, x: u32, y: u32) {
+            // replace nodes by representatives
+            let mut x = self.find_idx(x);
+            let mut y = self.find_idx(y);
+
+            if x == y {
+                // x and y are already in the same set
+                return;
+            }
+
+            // size is used to prevent unbalanced trees
+            // use the node with less descendants
+            if self.get(x).size < self.get(y).size {
+                std::mem::swap(&mut x, &mut y);
+            }
+
+            // make x the new root
+            self.get_mut(y).parent = x;
+
+            // update size of x
+            let new_size = self.get(x).size + self.get(y).size;
+            self.get_mut(x).size = new_size;
+        }
+    }
+}

@@ -1,4 +1,4 @@
-use crate::{intern::*, *};
+use crate::{UnionFind::UnionFind, intern::*, *};
 use std::collections::{HashMap, HashSet};
 
 // https://www.reddit.com/r/ProgrammingLanguages/comments/v5zwlw/resources_for_building_a_typechecker/
@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 // https://thunderseethe.dev/posts/bidirectional-constraint-generation/
 // https://smallcultfollowing.com/babysteps/blog/2017/03/25/unification-in-chalk-part-1/
 
-#[derive(Debug, Clone, Copy, Hash)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Default)]
 struct TypeId(pub Id);
 type Scope = HashMap<IdentId, TypeId>;
 struct Environment {
@@ -63,21 +63,18 @@ pub enum Type {
     Integer,
     Float,
     Bool,
-    Generic(u32, IdentId), // TODO: change this to be func: IdentId, name: IdentId,
+    Generic(IdentId),
     TypeVar(u32),
-    Array {
-        inner: TypeId,
-        size: u32,
-    },
-    Func {
-        params: List<TypeId>,
-        ret: TypeId,
-    },
-    Struct {
-        name: IdentId,
-        fields: List<(IdentId, TypeId)>,
-    },
-    Tuple(List<TypeId>),
+    // Array {
+    //     inner: TypeId,
+    //     size: u32,
+    // },
+    Func { params: List<TypeId>, ret: TypeId },
+    // Struct {
+    //     name: IdentId,
+    //     fields: List<(IdentId, TypeId)>,
+    // },
+    // Tuple(List<TypeId>),
 }
 
 const VOID_ID: TypeId = TypeId(0);
@@ -97,7 +94,8 @@ const PRIMITIVES: &[(Type, TypeId)] = &[
 pub enum TypeErrorKind {
     UndeclaredVar,
     WrongAnnotation { cause: Box<TypeError> },
-    WrongTypecheck { expected: Type, actual: Type },
+    TypeMismatch { a: Type, b: Type },
+    InfiniteType { source: Type, contains: Type },
     RequiredAnnotation,
 
     InvalidStmtInGlobal,
@@ -120,11 +118,11 @@ pub fn tyerr(kind: TypeErrorKind, span: &Span) -> TypeError {
 type TypeResult<T> = Result<T, TypeError>;
 
 #[derive(Default)]
-struct Inference {
+struct Unifier {
     ty_var_count: u32,
     constraints: Vec<(TypeId, TypeId)>,
 }
-impl Inference {
+impl Unifier {
     fn fresh_ty_var(&mut self) -> u32 {
         let res = self.ty_var_count;
         self.ty_var_count += 1;
@@ -132,10 +130,22 @@ impl Inference {
     }
 }
 
+#[derive(Default)]
+struct Substs(Vec<Option<TypeId>>);
+impl Substs {
+    pub fn fresh(&mut self) -> u32 {
+        let id = self.0.len() as u32;
+        self.0.push(None);
+        id
+    }
+}
+
 pub struct Typechecker {
     env: Environment,
     types: Interner<Type>,
-    unify: Inference,
+    generics_pool: HashMap<IdentId, TypeId>,
+
+    substs: Substs,
 
     vars_typed: Vec<(StmtId, TypeId)>,
     pub errors: Vec<TypeError>,
@@ -152,7 +162,8 @@ impl Default for Typechecker {
         Self {
             env: Environment::default(),
             types,
-            unify: Default::default(),
+            generics_pool: Default::default(),
+            substs: Default::default(),
             vars_typed: vec![],
             errors: vec![],
         }
@@ -181,18 +192,17 @@ fn type_to_annotation(ty_id: TypeId, tc: &Typechecker, ast: &mut Ast) -> TyAnnot
             args: Default::default(),
         },
 
-        Type::Generic(_, name) => TyAnnot::Type {
+        Type::Generic(name) => TyAnnot::Type {
             name: *name,
             args: Default::default(),
         },
 
         Type::TypeVar(u32) => unreachable!("can't convert a type var to a type annotation"),
 
-        Type::Array { inner, size } => TyAnnot::Array {
-            inner: type_to_annotation(*inner, tc, ast),
-            size: todo!("array types not implemented yet"),
-        },
-
+        // Type::Array { inner, size } => TyAnnot::Array {
+        //     inner: type_to_annotation(*inner, tc, ast),
+        //     size: todo!("array types not implemented yet"),
+        // },
         Type::Func { params, ret } => {
             let list = Vec::new();
             for param in params {
@@ -205,10 +215,8 @@ fn type_to_annotation(ty_id: TypeId, tc: &Typechecker, ast: &mut Ast) -> TyAnnot
                 params: list.into(),
                 ret: Some(ret),
             }
-        }
-
-        Type::Struct { name, fields } => todo!("structs not implemented yet"),
-        Type::Tuple(list) => todo!("tuple not implemented yet"),
+        } // Type::Struct { name, fields } => todo!("structs not implemented yet"),
+          // Type::Tuple(list) => todo!("tuple not implemented yet"),
     };
 
     ast.add_ty_annot(annot)
@@ -216,21 +224,16 @@ fn type_to_annotation(ty_id: TypeId, tc: &Typechecker, ast: &mut Ast) -> TyAnnot
 
 impl Typechecker {
     fn add_type(&mut self, ty: Type) -> TypeId {
-        // let id = self.types.len();
-        // self.types.push(ty);
         let id = self.types.add(ty);
         TypeId(id as Id)
     }
 
     fn add_ty_var(&mut self) -> TypeId {
-        let id = self
-            .types
-            .add(Type::Generic(self.unify.fresh_ty_var(), IdentId(0)));
-        TypeId(id as Id)
+        let id = self.substs.fresh();
+        self.add_type(Type::TypeVar(id))
     }
 
     fn get_type(&self, id: TypeId) -> &Type {
-        // &self.types[id.0 as usize]
         self.types.get(id.0)
     }
 
@@ -245,25 +248,17 @@ impl Typechecker {
         self.errors.push(e);
     }
 
-    fn add_annotation_as_type(&mut self, ast: &Ast, annot_id: TyAnnotId) -> TypeId {
-        self.add_annotation_as_type_with_generics(ast, annot_id, &[])
-    }
-
-    fn add_annotation_as_type_with_generics(
-        &mut self,
-        ast: &Ast,
-        annot_id: TyAnnotId,
-        generics: &[(IdentId, TypeId)],
-    ) -> TypeId {
+    // usually called "resolve"
+    fn add_type_from_annotation(&mut self, ast: &Ast, annot_id: TyAnnotId) -> TypeId {
         let (annot, span) = ast.get_annot(annot_id);
         let ty = match annot {
             TyAnnot::Type { name, args } => {
-                if let Some(generic) = generics.iter().find(|g| g.0 == *name) {
+                if let Some(generic) = self.generics_pool.get(name) {
                     if !args.is_empty() {
                         todo!("error, generic type variables can't have generic args")
                     }
 
-                    return generic.1;
+                    return *generic;
                 } else {
                     let str = ast.get_ident(*name);
                     match str {
@@ -276,23 +271,24 @@ impl Typechecker {
             }
 
             TyAnnot::Array { inner, size } => {
-                let inner_id = self.add_annotation_as_type(ast, *inner);
-                // TODO: size not handled right now
-                Type::Array {
-                    inner: inner_id,
-                    size: 0,
-                }
+                // let inner_id = self.add_annotation_as_type(ast, *inner);
+                // // TODO: size not handled right now
+                // Type::Array {
+                //     inner: inner_id,
+                //     size: 0,
+                // }
+                todo!("array not implemented")
             }
 
             TyAnnot::Func { params, ret } => {
                 let mut list = Vec::new();
                 for param in params {
-                    let id = self.add_annotation_as_type(ast, *param);
+                    let id = self.add_type_from_annotation(ast, *param);
                     list.push(id);
                 }
 
                 let ret = if let Some(ret) = ret {
-                    self.add_annotation_as_type(ast, *ret)
+                    self.add_type_from_annotation(ast, *ret)
                 } else {
                     VOID_ID
                 };
@@ -306,11 +302,11 @@ impl Typechecker {
             TyAnnot::Tuple(elems) => {
                 let mut list = Vec::new();
                 for elem in elems {
-                    let id = self.add_annotation_as_type(ast, *elem);
+                    let id = self.add_type_from_annotation(ast, *elem);
                     list.push(id);
                 }
-
-                Type::Tuple(list.into())
+                todo!(" tuple not implemented")
+                // Type::Tuple(list.into())
             }
         };
 
@@ -325,7 +321,7 @@ impl Typechecker {
         span: &Span,
     ) -> TypeResult<()> {
         let final_ty = if let Some(ty_annot) = var.ty {
-            let annot_id = self.add_annotation_as_type(ast, ty_annot);
+            let annot_id = self.add_type_from_annotation(ast, ty_annot);
             self.check(ast, var.rhs, annot_id)
                 .map_err(|e| tyerr(TypeErrorKind::WrongAnnotation { cause: Box::new(e) }, span))?;
             annot_id
@@ -343,8 +339,9 @@ impl Typechecker {
         let (stmt, span) = ast.get_stmt(stmt_id);
         match stmt {
             Stmt::FuncDecl(content) => {
-                // TODO: should check if fn name already exists
+                // TODO: should check if fn name already exists or else the ones declared earlier get shadowed globally
 
+                // TODO: should we check if generic names collides with primitive name?
                 if has_duplicates(&content.generics, |g| *g) {
                     return Err(tyerr(TypeErrorKind::DuplicateGenericsInFunction, span));
                 }
@@ -353,19 +350,15 @@ impl Typechecker {
                     return Err(tyerr(TypeErrorKind::DuplicateParamsInFunction, span));
                 }
 
-                // TODO: temporary solution
-                let generics: Vec<_> = content
-                    .generics
-                    .iter()
-                    .map(|g| {
-                        let ty_var = Type::Generic(self.unify.fresh_ty_var(), *g);
-                        (*g, self.add_type(ty_var))
-                    })
-                    .collect();
+                self.generics_pool.clear();
+                for generic in &content.generics {
+                    let ty = self.add_type(Type::Generic(*generic));
+                    self.generics_pool.insert(*generic, ty);
+                }
 
                 // add fn type to types list and to global scope
                 let ret = if let Some(ret) = content.ret {
-                    self.add_annotation_as_type_with_generics(ast, ret, &generics)
+                    self.add_type_from_annotation(ast, ret)
                 } else {
                     VOID_ID
                 };
@@ -374,7 +367,7 @@ impl Typechecker {
                     params: content
                         .params
                         .iter()
-                        .map(|p| self.add_annotation_as_type_with_generics(ast, p.1, &generics))
+                        .map(|p| self.add_type_from_annotation(ast, p.1))
                         .collect(),
                     ret,
                 };
@@ -412,16 +405,16 @@ impl Typechecker {
                             self.env.bind(param_content.0, *param_ty);
                         }
 
-                        let ret_actual = self.typecheck_block(ast, &content.code);
+                        let ret_actual = self.infer_block(ast, &content.code);
                         self.env.pop_scope();
 
                         let ret_actual = ret_actual?;
 
                         if ret_actual.0 != ret_expected.0 {
                             let err = tyerr(
-                                TypeErrorKind::WrongTypecheck {
-                                    expected: self.get_type(ret_expected).clone(),
-                                    actual: self.get_type(ret_actual).clone(),
+                                TypeErrorKind::TypeMismatch {
+                                    a: self.get_type(ret_expected).clone(),
+                                    b: self.get_type(ret_actual).clone(),
                                 },
                                 span,
                             );
@@ -447,11 +440,12 @@ impl Typechecker {
         Ok(())
     }
 
-    fn typecheck_block(&mut self, ast: &Ast, block: &Block) -> TypeResult<TypeId> {
+    fn infer_block(&mut self, ast: &Ast, block: &Block) -> TypeResult<TypeId> {
         let mut ret_ty = None;
 
-        for stmt_id in block.start.0..block.end.0 {
-            let stmt_id = StmtId(stmt_id);
+        let mut stmt_iter = block.start.0;
+        while stmt_iter < block.end.0 {
+            let stmt_id = StmtId(stmt_iter);
             let (stmt, span) = ast.get_stmt(stmt_id);
             match stmt {
                 Stmt::VarDecl(content) => self.var_decl(ast, content, stmt_id, span)?,
@@ -471,6 +465,13 @@ impl Typechecker {
                             }
                         },
 
+                        // TODO: we're visiting inner blocks more than once doing useless work
+                        // TODO: this loops program
+                        // Expr::Block(inner_block) => {
+                        //     self.infer_block(ast, inner_block)?;
+                        //     // WE continue visiting nodes from the last of this child block, or else we'll visit them more than once
+                        //     stmt_iter = inner_block.end.0;
+                        // }
                         _ => _ = self.infer(ast, *expr_id)?,
                     }
                 }
@@ -480,6 +481,8 @@ impl Typechecker {
                     Err(err)?
                 }
             };
+
+            stmt_iter += 1;
         }
 
         // if we didn't find any return types, this block has type void
@@ -495,6 +498,9 @@ impl Typechecker {
 
             Expr::Grouping(expr) => self.infer(ast, *expr)?,
 
+            // TODO: be careful. we can assign type variables to a variable (just think of a generic function)
+            // A generic function is not instantiated, so what do we really assign to the variable?
+            // We could infer the acctual function type by successive calls, however, that function can be only ONE thing (monomorphic) and not be polymorphic
             Expr::Variable(name) => self
                 .env
                 .lookup(*name)
@@ -521,6 +527,11 @@ impl Typechecker {
             }
 
             Expr::Call { callee, args } => {
+                // TODO: problem arises if the callee is a type variable.
+                // Example: fn id<T>(T x) -> T { return x; }
+                // let a = id;
+                // As id is a generic function, it is not an instantiated type, so calling a returns a type variable
+
                 let ty_id = self.infer(ast, *callee)?;
                 match self.get_type(ty_id).clone() {
                     Type::Func { params, ret } => {
@@ -528,7 +539,7 @@ impl Typechecker {
 
                         for (param, arg) in params.iter().zip(args.iter()) {
                             match self.get_type(*param) {
-                                Type::Generic(_, _) => {
+                                Type::Generic(_) => {
                                     let ty_var = self.add_ty_var();
                                     self.check(ast, *arg, ty_var)?
                                 }
@@ -543,16 +554,17 @@ impl Typechecker {
             }
 
             Expr::Indexing { src, idx } => {
-                self.check(ast, *idx, INT_ID)?;
-
-                let ty = self.infer(ast, *src)?;
-                match self.get_type(ty) {
-                    Type::Array { inner, size } => {
-                        // TODO: we might even do constant bound checking here
-                        *inner
-                    }
-                    _ => Err(tyerr(TypeErrorKind::IndexingWithWrongType, span))?,
-                }
+                //                 self.check(ast, *idx, INT_ID)?;
+                //
+                //                 let ty = self.infer(ast, *src)?;
+                //                 match self.get_type(ty) {
+                //                     Type::Array { inner, size } => {
+                //                         // TODO: we might even do constant bound checking here
+                //                         *inner
+                //                     }
+                //                     _ => Err(tyerr(TypeErrorKind::IndexingWithWrongType, span))?,
+                //                 }
+                todo!("array not implemented")
             }
 
             Expr::Member { src, member } => {
@@ -561,7 +573,7 @@ impl Typechecker {
 
             Expr::Block(block) => {
                 self.env.push_scope();
-                let res = self.typecheck_block(ast, block);
+                let res = self.infer_block(ast, block);
                 self.env.pop_scope();
                 res?
             }
@@ -579,25 +591,145 @@ impl Typechecker {
             Expr::FloatLiteral(_) => FLOAT_ID,
             _ => {
                 let inferred_ty = self.infer(ast, expr_id)?;
-                inferred_ty
+                return self.unify(expected_ty, inferred_ty, span);
             }
         };
 
-        // types are interned so hopefully this is enough to check them
-        if inferred_ty.0 != expected_ty.0 {
-            self.unify.constraints.push((inferred_ty, expected_ty));
+        //         // types are interned so hopefully this is enough to check them
+        //         if inferred_ty.0 != expected_ty.0 {
+        //             self.unification
+        //                 .constraints
+        //                 .push((inferred_ty, expected_ty));
+        //
+        //             // let err = tyerr(
+        //             //     TypeErrorKind::WrongTypecheck {
+        //             //         expected: self.get_type(expected_ty_id).clone(),
+        //             //         actual: self.get_type(inferred_ty).clone(),
+        //             //     },
+        //             //     span,
+        //             // );
+        //             // Err(err)
+        //             Ok(())
+        //         } else {
+        //             Ok(())
+        //         }
 
-            // let err = tyerr(
-            //     TypeErrorKind::WrongTypecheck {
-            //         expected: self.get_type(expected_ty_id).clone(),
-            //         actual: self.get_type(inferred_ty).clone(),
-            //     },
-            //     span,
-            // );
-            // Err(err)
-            Ok(())
-        } else {
-            Ok(())
+        Ok(())
+    }
+
+    fn unify(&mut self, ty_a: TypeId, ty_b: TypeId, span: &Span) -> TypeResult<()> {
+        let ty_a = self.ty_normalize(ty_a);
+        let ty_b = self.ty_normalize(ty_b);
+
+        match (self.get_type(ty_a).clone(), self.get_type(ty_b).clone()) {
+            (Type::TypeVar(x), Type::TypeVar(y)) => {
+                if x != y {
+                    return Err(tyerr(
+                        TypeErrorKind::TypeMismatch {
+                            a: self.get_type(ty_a).clone(),
+                            b: self.get_type(ty_b).clone(),
+                        },
+                        span,
+                    ));
+                }
+            }
+
+            (Type::TypeVar(x), _) => {
+                if self.ty_occurs_check(ty_b, x) {
+                    return Err(tyerr(
+                        TypeErrorKind::InfiniteType {
+                            source: self.get_type(ty_b).clone(),
+                            contains: self.get_type(ty_a).clone(),
+                        },
+                        span,
+                    ));
+                } else {
+                    self.ty_substitute(x, ty_b);
+                }
+            }
+            (_, Type::TypeVar(x)) => {
+                if self.ty_occurs_check(ty_a, x) {
+                    return Err(tyerr(
+                        TypeErrorKind::InfiniteType {
+                            source: self.get_type(ty_a).clone(),
+                            contains: self.get_type(ty_b).clone(),
+                        },
+                        span,
+                    ));
+                } else {
+                    self.ty_substitute(x, ty_a);
+                }
+            }
+
+            (Type::Integer, Type::Integer)
+            | (Type::Bool, Type::Bool)
+            | (Type::Float, Type::Float) => {}
+
+            (Type::Generic(x), Type::Generic(y)) => {
+                if x != y {
+                    todo!("unification failed")
+                }
+            }
+
+            (
+                Type::Func {
+                    params: params_l,
+                    ret: ret_l,
+                },
+                Type::Func {
+                    params: params_r,
+                    ret: ret_r,
+                },
+            ) => {
+                for (param_l, param_r) in params_l.iter().zip(params_r.iter()) {
+                    self.unify(*param_l, *param_r, span)?;
+                }
+
+                self.unify(ret_l, ret_r, span)?;
+            }
+
+            _ => {
+                return Err(tyerr(
+                    TypeErrorKind::TypeMismatch {
+                        a: self.get_type(ty_a).clone(),
+                        b: self.get_type(ty_b).clone(),
+                    },
+                    span,
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn ty_normalize(&mut self, ty: TypeId) -> TypeId {
+        match self.get_type(ty) {
+            Type::TypeVar(x) => {
+                if let Some(parent) = self.substs.0[*x as usize] {
+                    self.ty_normalize(parent)
+                } else {
+                    ty
+                }
+            }
+
+            _ => ty,
+        }
+    }
+
+    fn ty_substitute(&mut self, type_var: u32, ty: TypeId) {
+        self.substs.0[type_var as usize] = Some(ty);
+    }
+
+    fn ty_occurs_check(&self, ty: TypeId, ty_var: u32) -> bool {
+        match self.get_type(ty) {
+            Type::Void | Type::Bool | Type::Integer | Type::Float => false,
+            Type::Generic(_) => false,
+            Type::Func { params, ret } => {
+                params.iter().any(|p| self.ty_occurs_check(*p, ty_var))
+                    || self.ty_occurs_check(*ret, ty_var)
+            }
+
+            Type::TypeVar(inner_ty_var) => *inner_ty_var == ty_var,
         }
     }
 }
@@ -623,7 +755,6 @@ pub fn typecheck(ast: &mut Ast) -> Typechecker {
     }
 
     println!("{:?}", tc.types);
-    println!("{:?}", tc.unify.constraints);
 
     if !tc.errors.is_empty() {
         return tc;

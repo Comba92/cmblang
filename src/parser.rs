@@ -450,11 +450,11 @@ impl Parser {
 
                 let ty = if c.eat(TokenKind::SquareL).is_some() {
                     let inner = self.add_ty_annot(TyAnnot::Type { name, args }, c, tok);
-                    let size = self.parse_expr(c, 0)?;
+                    let size = self.parse_expr(c, 0)?; // TODO: not sure about this
                     c.expect(
                         TokenKind::SquareR,
                         &[TokenKind::Semicolon, TokenKind::Equal],
-                        || "array indexing value",
+                        || "array size value",
                     )?;
 
                     TyAnnot::Array { inner, size }
