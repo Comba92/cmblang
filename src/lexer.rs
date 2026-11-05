@@ -45,6 +45,7 @@ pub enum TokenKind {
     FloatNumber,
 
     Arrow,
+    DotDot,
     // Comparisons
     EqualEq,
     NotEq,
@@ -358,7 +359,7 @@ pub fn scan(input: String) -> Result<Lexer, LexError> {
                 '{' => TokenKind::BraceL,
                 '}' => TokenKind::BraceR,
                 ',' => TokenKind::Comma,
-                '.' => TokenKind::Dot,
+                '.' => cursor.eat_double_or_single('=', TokenKind::DotDot, TokenKind::Dot),
                 ':' => TokenKind::Colon,
                 ';' => TokenKind::Semicolon,
                 '?' => TokenKind::Question,

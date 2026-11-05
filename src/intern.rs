@@ -51,6 +51,11 @@ impl<T: hash::Hash> Interner<T> {
         }
     }
 
+    pub fn is_interned(&self, val: &T) -> bool {
+        let hash = hash(&val);
+        self.hash_to_id.get(&hash).is_some()
+    }
+
     pub fn add(&mut self, val: T) -> u32 {
         let hash = hash(&val);
         if let Some(id) = self.hash_to_id.get(&hash) {

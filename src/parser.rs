@@ -11,7 +11,7 @@ pub type Id = u32;
 pub struct ExprId(pub Id);
 #[derive(Debug, Clone, Copy)]
 pub struct StmtId(pub Id);
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct IdentId(pub Id);
 #[derive(Debug, Clone, Copy)]
 pub struct TyAnnotId(pub Id);
@@ -32,10 +32,14 @@ pub enum Expr {
     FloatLiteral(f32),
     BoolLiteral(bool),
     // ArrayLiteral(List<ExprId>),
+    StructLiteral(IdentId, List<(IdentId, ExprId)>),
     Variable(IdentId),
     Grouping(ExprId),
 
-    // Assign { lhs: ExprId, rhs: ExprId },
+    // Assign {
+    //     lhs: ExprId,
+    //     rhs: ExprId,
+    // },
     Return(ExprId),
 
     Unary {
@@ -68,16 +72,16 @@ pub enum Expr {
 
     Block(Block),
 }
-impl Expr {
-    fn is_assignable(&self) -> bool {
-        use Expr::*;
-
-        match self {
-            Variable(_) | Indexing { .. } | Member { .. } => true,
-            _ => false,
-        }
-    }
-}
+// impl Expr {
+//     fn is_assignable(&self) -> bool {
+//         use Expr::*;
+//
+//         match self {
+//             Variable(_) | Indexing { .. } | Member { .. } => true,
+//             _ => false,
+//         }
+//     }
+// }
 
 #[derive(Debug)]
 pub enum TyAnnot {
@@ -88,7 +92,7 @@ pub enum TyAnnot {
     },
     Array {
         inner: TyAnnotId,
-        size: ExprId, // TODO: to think about this
+        size: ExprId,
     },
     Func {
         params: List<TyAnnotId>,
@@ -293,7 +297,35 @@ impl Parser {
 
             TokenKind::Ident => {
                 let ident = self.add_ident(c, tok);
-                self.add_expr(Expr::Variable(ident), c, tok)
+                if c.eat(TokenKind::BraceL).is_some() {
+                    let mut fields = self.parse_listing(
+                        c,
+                        TokenKind::Comma,
+                        TokenKind::BraceR,
+                        |p, c| {
+                            let name = p.parse_ident(
+                                c,
+                                &[TokenKind::Comma, TokenKind::BraceR],
+                                "struct literal",
+                            )?;
+                            c.expect(
+                                TokenKind::Colon,
+                                &[TokenKind::Comma, TokenKind::BraceR],
+                                || "struct literal values",
+                            )?;
+
+                            Ok((name, p.parse_expr(c, 0)?))
+                        },
+                        ListingKind::StructFields,
+                    )?;
+
+                    // we sort the fields because they might come in any order
+                    fields.sort_by_key(|f| f.0);
+
+                    self.add_expr(Expr::StructLiteral(ident, fields), c, tok)
+                } else {
+                    self.add_expr(Expr::Variable(ident), c, tok)
+                }
             }
 
             // prefix op
@@ -404,9 +436,13 @@ impl Parser {
                         c,
                         tok,
                     );
+                // } else if c.eat(TokenKind::Equal).is_some() {
+                //     // TODO: not sure about this. this permits to chain multiple assignments
+                //     // assignment should probably just be a statement
+                //     // check if lhs is assignable is done at typechecking level
+                //     let rhs = self.parse_expr(c, 0)?;
+                //     lhs = self.add_expr(Expr::Assign { lhs, rhs }, c, tok);
                 } else {
-                    // TODO: check for assignment here
-
                     let rhs = self.parse_expr(c, right_lvl)?;
 
                     lhs = self.add_expr(
@@ -450,7 +486,7 @@ impl Parser {
 
                 let ty = if c.eat(TokenKind::SquareL).is_some() {
                     let inner = self.add_ty_annot(TyAnnot::Type { name, args }, c, tok);
-                    let size = self.parse_expr(c, 0)?; // TODO: not sure about this
+                    let size = self.parse_expr(c, 0)?; // expression is checked for constness at typechecker level
                     c.expect(
                         TokenKind::SquareR,
                         &[TokenKind::Semicolon, TokenKind::Equal],
@@ -760,7 +796,7 @@ impl Parser {
                     &[TokenKind::BraceR],
                     || "struct declaration identifier",
                 )?;
-                let fields = self.parse_listing(
+                let mut fields = self.parse_listing(
                     c,
                     TokenKind::Comma,
                     TokenKind::BraceR,
@@ -779,6 +815,9 @@ impl Parser {
                     },
                     ListingKind::StructFields,
                 )?;
+
+                // we sort the fields because literals might list them in any order
+                fields.sort_by_key(|f| f.0);
 
                 self.add_stmt(
                     Stmt::StructDecl(StructContent {
