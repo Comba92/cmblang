@@ -101,10 +101,12 @@ pub enum TypeErrorKind {
     InvalidStmtInGlobal,
     InvalidStmtInBlock,
 
+    WrongArgumentsCount,
     DuplicateParamsInFunction,
     DuplicateGenericsInFunction,
     DuplicateFieldsInStruct,
     DuplicateGenericsInStruct,
+
 
     CallingWithWrongType,
     IndexingWithWrongType,
@@ -502,10 +504,14 @@ impl Typechecker {
             // TODO: be careful. we can assign type variables to a variable (just think of a generic function)
             // A generic function is not instantiated, so what do we really assign to the variable?
             // We could infer the acctual function type by successive calls, however, that function can be only ONE thing (monomorphic) and not be polymorphic
-            Expr::Variable(name) => self
+            Expr::Variable(name) => {
+              let ty = self
                 .env
                 .lookup(*name)
-                .ok_or_else(|| tyerr(TypeErrorKind::UndeclaredVar, span))?,
+                .ok_or_else(|| tyerr(TypeErrorKind::UndeclaredVar, span))?;
+
+              self.ty_instantiate(ty)
+            }
 
             Expr::Return(id) => self.infer(ast, *id)?,
 
@@ -543,6 +549,10 @@ impl Typechecker {
 
                         for (param, arg) in params.iter().zip(args.iter()) {
                           self.check(ast, *arg, *param)?;
+                        }
+
+                        if params.len() != args.len() {
+                          return Err(tyerr(TypeErrorKind::WrongArgumentsCount, span))
                         }
 
                         self.ty_normalize(ret)
