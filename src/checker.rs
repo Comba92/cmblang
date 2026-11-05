@@ -69,7 +69,7 @@ pub enum Type {
     //     inner: TypeId,
     //     size: u32,
     // },
-    Func { params: List<TypeId>, ret: TypeId },
+    Func { params: List<TypeId>, ret: TypeId }, // TODO: put generics set here
     // Struct {
     //     name: IdentId,
     //     fields: List<(IdentId, TypeId)>,
@@ -324,6 +324,7 @@ impl Typechecker {
             let annot_id = self.add_type_from_annotation(ast, ty_annot);
             self.check(ast, var.rhs, annot_id)
                 .map_err(|e| tyerr(TypeErrorKind::WrongAnnotation { cause: Box::new(e) }, span))?;
+
             annot_id
         } else {
             self.infer(ast, var.rhs)?
@@ -533,20 +534,18 @@ impl Typechecker {
                 // As id is a generic function, it is not an instantiated type, so calling a returns a type variable
 
                 let ty_id = self.infer(ast, *callee)?;
-                match self.get_type(ty_id).clone() {
-                    Type::Func { params, ret } => {
+                match self.get_type(ty_id) {
+                    Type::Func { .. } => {
                         // we must clone to both access params and do check
+                        self.generics_pool.clear();
+                        let instance_id = self.ty_instantiate(ty_id);
+                        let Type::Func { params, ret } = self.get_type(instance_id).clone() else { unreachable!() };
 
                         for (param, arg) in params.iter().zip(args.iter()) {
-                            match self.get_type(*param) {
-                                Type::Generic(_) => {
-                                    let ty_var = self.add_ty_var();
-                                    self.check(ast, *arg, ty_var)?
-                                }
-                                _ => self.check(ast, *arg, *param)?,
-                            }
+                          self.check(ast, *arg, *param)?;
                         }
-                        ret
+
+                        self.ty_normalize(ret)
                     }
 
                     _ => Err(tyerr(TypeErrorKind::CallingWithWrongType, span))?,
@@ -585,13 +584,13 @@ impl Typechecker {
     fn check(&mut self, ast: &Ast, expr_id: ExprId, expected_ty: TypeId) -> TypeResult<()> {
         let (expr, span) = ast.get_expr(expr_id);
 
-        let inferred_ty = match expr {
-            Expr::BoolLiteral(_) => BOOL_ID,
-            Expr::IntLiteral(_) => INT_ID,
-            Expr::FloatLiteral(_) => FLOAT_ID,
+        match expr {
+            // Expr::BoolLiteral(_) => BOOL_ID,
+            // Expr::IntLiteral(_) => INT_ID,
+            // Expr::FloatLiteral(_) => FLOAT_ID,
             _ => {
                 let inferred_ty = self.infer(ast, expr_id)?;
-                return self.unify(expected_ty, inferred_ty, span);
+                self.unify(expected_ty, inferred_ty, span)?;
             }
         };
 
@@ -667,7 +666,13 @@ impl Typechecker {
 
             (Type::Generic(x), Type::Generic(y)) => {
                 if x != y {
-                    todo!("unification failed")
+                  return Err(tyerr(
+                      TypeErrorKind::TypeMismatch {
+                          a: self.get_type(ty_a).clone(),
+                          b: self.get_type(ty_b).clone(),
+                      },
+                      span,
+                  ));
                 }
             }
 
@@ -718,6 +723,27 @@ impl Typechecker {
 
     fn ty_substitute(&mut self, type_var: u32, ty: TypeId) {
         self.substs.0[type_var as usize] = Some(ty);
+    }
+
+    fn ty_instantiate(&mut self, ty: TypeId) -> TypeId {
+        match self.get_type(ty).clone() {
+            Type::Func { params, ret } => {
+                let instantiated: Vec<_> = params.iter().map(|p| self.ty_instantiate(*p)).collect();
+                let ret_instantiated = self.ty_instantiate(ret);
+                let id = self.add_type(Type::Func { params: instantiated.into(), ret: ret_instantiated  });
+                id
+            }
+            Type::Generic(name) => {
+              if let Some(fresh) = self.generics_pool.get(&name) {
+                *fresh
+              } else {
+                let fresh = self.add_ty_var();
+                self.generics_pool.insert(name, fresh);
+                fresh
+              }
+            }
+            _ => ty,
+        }
     }
 
     fn ty_occurs_check(&self, ty: TypeId, ty_var: u32) -> bool {
@@ -771,6 +797,9 @@ pub fn typecheck(ast: &mut Ast) -> Typechecker {
             _ => unreachable!(),
         }
     }
+
+    println!("{:?}", ast.annots);
+    println!("{:?}", ast.stmts);
 
     tc
 }
