@@ -460,17 +460,7 @@ impl Typechecker {
 
                         let ret_actual = ret_actual?;
 
-                        if ret_actual.0 != ret_expected.0 {
-                            let err = tyerr(
-                                TypeErrorKind::TypeMismatch {
-                                    a: self.get_type(ret_expected).clone(),
-                                    b: self.get_type(ret_actual).clone(),
-                                },
-                                span,
-                            );
-
-                            Err(err)?
-                        }
+                        self.unify(ret_actual, ret_expected, span)?;
                     }
 
                     _ => unreachable!(
@@ -732,7 +722,8 @@ impl Typechecker {
                 }
             }
 
-            (Type::Integer, Type::Integer)
+            (Type::Void, Type::Void)
+            | (Type::Integer, Type::Integer)
             | (Type::Bool, Type::Bool)
             | (Type::Float, Type::Float) => {}
 
