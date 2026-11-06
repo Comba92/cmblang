@@ -63,23 +63,31 @@ pub enum Type {
     Integer,
     Float,
     Bool,
-    Generic(IdentId), // TODO: this should be scoped man
+    Generic(IdentId),
     TypeVar(u32),
     // Array {
     //     inner: TypeId,
     //     size: u32,
     // },
     // Tuple(List<TypeId>),
-    Func {
-        generics: List<IdentId>, // TODO: is this needed?
-        params: List<TypeId>,
-        ret: TypeId,
-    },
-    Struct {
-        generics: List<IdentId>, // TODO: is this needed?
-        name: IdentId,           // TODO: is name needed?
-        fields: List<(IdentId, TypeId)>,
-    },
+    Func { params: List<TypeId>, ret: TypeId },
+    UserDef { args: List<TypeId>, name: IdentId },
+}
+
+#[derive(Debug, Clone)]
+pub struct StructInfo {
+    // ty_id: TypeId,
+    generics: List<IdentId>,
+    name: IdentId,
+    fields: List<(IdentId, TypeId)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FuncInfo {
+    ty_id: TypeId, // TODO: is this needed?
+    generics: List<IdentId>,
+    params: List<TypeId>,
+    ret: TypeId,
 }
 
 const VOID_ID: TypeId = TypeId(0);
@@ -107,6 +115,7 @@ pub enum TypeErrorKind {
 
     WrongCallArgumentsCount,
     WrongStructLiteralCount,
+    WrongTypeArgumentsCount,
     WrongStructLiteralField,
     DuplicateParamsInFunction,
     DuplicateGenericsInFunction,
@@ -117,6 +126,7 @@ pub enum TypeErrorKind {
     IndexingWithWrongType,
     ValueNotAssignable,
     UndeclaredType,
+    ArgumentsInGenericParameter,
 }
 
 type TypeError = Spanned<TypeErrorKind>;
@@ -142,10 +152,10 @@ pub struct Typechecker {
     env: Environment,
     pub types: Interner<Type>,
 
-    pub funcs: HashMap<IdentId, TypeId>,
-    pub structs: HashMap<IdentId, TypeId>,
+    pub funcs: HashMap<IdentId, FuncInfo>,
+    pub structs: HashMap<IdentId, StructInfo>,
 
-    generics_pool: HashMap<IdentId, TypeId>, // here just so we dont have to pass it around and allocate a new one each time
+    generics_pool: HashSet<IdentId>,
 
     substs: Substs,
 
@@ -216,10 +226,9 @@ fn type_to_annotation(ty_id: TypeId, tc: &Typechecker, ast: &mut Ast) -> TyAnnot
                 ret: Some(ret),
             }
         }
-        Type::Struct {
+        Type::UserDef {
             name,
-            generics,
-            fields,
+            args: generics,
         } => {
             todo!("struct to annotation not implemented");
             //             let mut list = Vec::new();
@@ -269,24 +278,44 @@ impl Typechecker {
     }
 
     // usually called "resolve"
-    fn add_type_from_annotation(&mut self, ast: &Ast, annot_id: TyAnnotId) -> TypeId {
-        let (annot, _) = ast.get_annot(annot_id);
+    fn add_type_from_annotation(&mut self, ast: &Ast, annot_id: TyAnnotId) -> TypeResult<TypeId> {
+        let (annot, span) = ast.get_annot(annot_id);
         let ty = match annot {
             TyAnnot::Type { name, args } => {
-                if let Some(generic) = self.generics_pool.get(name) {
-                    if !args.is_empty() {
-                        panic!("error, generic type variables can't have generic args")
+                if args.is_empty() {
+                    // it is either a primitive or generic parameter
+
+                    let str = ast.get_str(*name);
+                    match str {
+                        "bool" => return Ok(BOOL_ID),
+                        "int" => return Ok(INT_ID),
+                        "float" => return Ok(FLOAT_ID),
+                        _ => {
+                            // it has to be a generic parameter
+                            //
+                            // TODO: check inside generics pool
+                            return Ok(self.add_type(Type::Generic(*name)));
+                        }
+                    };
+                }
+
+                if let Some(struct_info) = self.structs.get(name) {
+                    if struct_info.generics.len() != args.len() {
+                        Err(tyerr(TypeErrorKind::WrongTypeArgumentsCount, span))?
                     }
 
-                    return *generic;
-                } else {
-                    let str = ast.get_ident(*name);
-                    match str {
-                        "bool" => return BOOL_ID,
-                        "int" => return INT_ID,
-                        "float" => return FLOAT_ID,
-                        _ => todo!("user defined types"),
+                    let mut list = Vec::new();
+                    for arg in args {
+                        let ty_id = self.add_type_from_annotation(ast, *arg)?;
+                        list.push(ty_id);
                     }
+
+                    Type::UserDef {
+                        args: list.into(),
+                        name: *name,
+                    }
+                } else {
+                    Err(tyerr(TypeErrorKind::UndeclaredType, span))?
                 }
             }
 
@@ -303,18 +332,17 @@ impl Typechecker {
             TyAnnot::Func { params, ret } => {
                 let mut list = Vec::new();
                 for param in params {
-                    let id = self.add_type_from_annotation(ast, *param);
+                    let id = self.add_type_from_annotation(ast, *param)?;
                     list.push(id);
                 }
 
                 let ret = if let Some(ret) = ret {
-                    self.add_type_from_annotation(ast, *ret)
+                    self.add_type_from_annotation(ast, *ret)?
                 } else {
                     VOID_ID
                 };
 
                 Type::Func {
-                    generics: Default::default(),
                     params: list.into(),
                     ret,
                 }
@@ -323,7 +351,7 @@ impl Typechecker {
             TyAnnot::Tuple(elems) => {
                 let mut list = Vec::new();
                 for elem in elems {
-                    let id = self.add_type_from_annotation(ast, *elem);
+                    let id = self.add_type_from_annotation(ast, *elem)?;
                     list.push(id);
                 }
                 todo!(" tuple not implemented")
@@ -331,7 +359,7 @@ impl Typechecker {
             }
         };
 
-        self.add_type(ty)
+        Ok(self.add_type(ty))
     }
 
     fn var_decl(
@@ -342,7 +370,7 @@ impl Typechecker {
         span: &Span,
     ) -> TypeResult<()> {
         let final_ty = if let Some(ty_annot) = var.ty {
-            let annot_id = self.add_type_from_annotation(ast, ty_annot);
+            let annot_id = self.add_type_from_annotation(ast, ty_annot)?;
             self.check(ast, var.rhs, annot_id)
                 .map_err(|e| tyerr(TypeErrorKind::WrongAnnotation { cause: Box::new(e) }, span))?;
 
@@ -358,6 +386,11 @@ impl Typechecker {
     }
 
     fn global_pass(&mut self, ast: &Ast, stmt_id: StmtId) -> TypeResult<()> {
+        // TODO: structs should need two passes.
+        // a struct can reference another struct which might not yet declared
+        // so the first pass takse the structs name and pushes to the types scopes,
+        // the seconds collects the struct fields
+
         let (stmt, span) = ast.get_stmt(stmt_id);
         match stmt {
             Stmt::FuncDecl(content) => {
@@ -372,31 +405,34 @@ impl Typechecker {
                     return Err(tyerr(TypeErrorKind::DuplicateParamsInFunction, span));
                 }
 
-                self.generics_pool.clear();
-                for generic in &content.generics {
-                    let ty = self.add_type(Type::Generic(*generic));
-                    self.generics_pool.insert(*generic, ty);
-                }
-
                 // add fn type to types list and to global scope
                 let ret = if let Some(ret) = content.ret {
-                    self.add_type_from_annotation(ast, ret)
+                    self.add_type_from_annotation(ast, ret)?
                 } else {
                     VOID_ID
                 };
+                let mut params = Vec::new();
+                for param in &content.params {
+                    params.push(self.add_type_from_annotation(ast, param.1)?);
+                }
 
                 let ty = Type::Func {
-                    generics: content.generics.clone(),
-                    params: content
-                        .params
-                        .iter()
-                        .map(|p| self.add_type_from_annotation(ast, p.1))
-                        .collect(),
+                    params: params.clone().into(),
                     ret,
                 };
 
                 let ty_id = self.add_type(ty);
-                self.funcs.insert(content.name, ty_id); // TODO: can we shadow function names?
+                self.funcs.insert(
+                    content.name,
+                    FuncInfo {
+                        ty_id,
+                        generics: content.generics.clone(),
+                        params: params.into(),
+                        ret,
+                    },
+                );
+
+                // TODO: can we shadow function names?
                 self.env.bind(content.name, ty_id);
             }
 
@@ -409,24 +445,36 @@ impl Typechecker {
                     return Err(tyerr(TypeErrorKind::DuplicateFieldsInStruct, span));
                 }
 
-                self.generics_pool.clear();
-                for generic in &content.generics {
-                    let ty = self.add_type(Type::Generic(*generic));
-                    self.generics_pool.insert(*generic, ty);
+                // TODO: check for self inside fields types
+
+                let mut fields = Vec::new();
+                for field in &content.fields {
+                    fields.push((field.0, self.add_type_from_annotation(ast, field.1)?));
                 }
 
-                let ty = Type::Struct {
-                    generics: content.generics.clone(),
-                    name: content.name,
-                    fields: content
-                        .fields
-                        .iter()
-                        .map(|f| (f.0, self.add_type_from_annotation(ast, f.1)))
-                        .collect(),
-                };
+                let mut generics = Vec::new();
+                for generic in &content.generics {
+                    generics.push(self.add_type(Type::Generic(*generic)));
+                }
 
-                let id = self.add_type(ty);
-                self.structs.insert(content.name, id);
+                // TODO: do we really have to do this?
+                // or do we always query for struct info?
+                //                 let ty = Type::UserDef {
+                //                     args: generics.into(),
+                //                     name: content.name,
+                //                 };
+                //
+                //                 let ty_id = self.add_type(ty);
+
+                self.structs.insert(
+                    content.name,
+                    StructInfo {
+                        // ty_id,
+                        generics: content.generics.clone(),
+                        name: content.name,
+                        fields: fields.into(),
+                    },
+                );
             }
             _ => {}
         }
@@ -440,17 +488,18 @@ impl Typechecker {
             Stmt::VarDecl(content) => self.var_decl(ast, content, stmt_id, span)?,
 
             Stmt::FuncDecl(content) => {
-                self.env.push_scope();
+                let func = self
+                    .env
+                    .lookup(content.name)
+                    .ok_or_else(|| tyerr(TypeErrorKind::UndeclaredVar, span))?;
 
-                let func = self.env.lookup(content.name).expect(
-                    "function should already be in global scope after name resolution pass",
-                );
                 match self.get_type(func).clone() {
                     Type::Func {
                         params,
                         ret: ret_expected,
                         ..
                     } => {
+                        self.env.push_scope();
                         for (param_ty, param_content) in params.iter().zip(content.params.iter()) {
                             self.env.bind(param_content.0, *param_ty);
                         }
@@ -459,7 +508,6 @@ impl Typechecker {
                         self.env.pop_scope();
 
                         let ret_actual = ret_actual?;
-
                         self.unify(ret_actual, ret_expected, span)?;
                     }
 
@@ -547,7 +595,34 @@ impl Typechecker {
                     .lookup(*name)
                     .ok_or_else(|| tyerr(TypeErrorKind::UndeclaredVar, span))?;
 
-                self.ty_instantiate(ty, &mut HashMap::new())
+                let res = match self.get_type(ty) {
+                    Type::Func { params, ret } => {
+                        //                         let info = self.funcs.get(name).unwrap().clone();
+                        //
+                        //                         let mut map = info
+                        //                             .generics
+                        //                             .iter()
+                        //                             .map(|g| (*g, self.add_ty_var()))
+                        //                             .collect();
+                        self.ty_instantiate(ty, &mut HashMap::new())
+                    }
+
+                    Type::UserDef { args, name } => {
+                        // let info = self.structs.get(&name).unwrap().clone();
+                        // let mut map = info
+                        //     .generics
+                        //     .iter()
+                        //     .map(|g| (*g, self.add_ty_var()))
+                        //     .collect();
+                        self.ty_instantiate(ty, &mut HashMap::new())
+                    }
+
+                    _ => ty,
+                };
+                res
+
+                // TODO: this doesnt work
+                // self.ty_instantiate(ty, &mut HashMap::new())
             }
 
             Expr::Return(id) => self.infer(ast, *id)?,
@@ -577,13 +652,13 @@ impl Typechecker {
                 // As id is a generic function, it is not an instantiated type, so calling a returns a type variable
 
                 let ty_id = self.infer(ast, *callee)?;
-                match self.get_type(ty_id) {
-                    Type::Func { .. } => {
-                        let instance_id = self.ty_instantiate(ty_id, &mut HashMap::new());
-                        let Type::Func { params, ret, .. } = self.get_type(instance_id).clone()
-                        else {
-                            unreachable!()
-                        };
+                match self.get_type(ty_id).clone() {
+                    Type::Func { params, ret } => {
+                        // let instance_id = self.ty_instantiate(ty_id, &mut HashMap::new());
+                        // let Type::Func { params, ret, .. } = self.get_type(instance_id).clone()
+                        // else {
+                        //     unreachable!()
+                        // };
 
                         // we must clone to both access params and do check
                         for (param, arg) in params.iter().zip(args.iter()) {
@@ -595,24 +670,26 @@ impl Typechecker {
                         }
 
                         // return value might be a type variable, we have to normalize and get the potential solved type
-                        self.ty_normalize(ret)
+                        ret
                     }
 
+                    // TODO: handle this
+                    // Type::TypeVar(id) => {}
                     _ => Err(tyerr(TypeErrorKind::CallingWithWrongType, span))?,
                 }
             }
 
             Expr::StructLiteral(name, args) => {
-                if let Some(ty) = self.structs.get(name) {
-                    let instance_id = self.ty_instantiate(*ty, &mut HashMap::new());
+                if let Some(info) = self.structs.get(name).cloned() {
+                    // let instance_id = self.ty_instantiate(info.ty_id, &mut HashMap::new());
 
-                    let Type::Struct { fields, .. } = self.get_type(instance_id).clone() else {
-                        unreachable!()
-                    };
+                    // let Type::UserDef { fields, .. } = self.get_type(instance_id).clone() else {
+                    //     unreachable!()
+                    // };
 
                     // we must clone to both access fields and do check
                     for ((field_name, field_ty), (value_name, value)) in
-                        fields.iter().zip(args.iter())
+                        info.fields.iter().zip(args.iter())
                     {
                         if field_name != value_name {
                             return Err(tyerr(TypeErrorKind::WrongStructLiteralField, span));
@@ -620,11 +697,16 @@ impl Typechecker {
                         self.check(ast, *value, *field_ty)?;
                     }
 
-                    if fields.len() != args.len() {
+                    if info.fields.len() != args.len() {
                         return Err(tyerr(TypeErrorKind::WrongStructLiteralCount, span));
                     }
 
-                    instance_id
+                    let ty_id = self.add_type(Type::UserDef {
+                        args: Default::default(),
+                        name: *name,
+                    });
+
+                    self.ty_instantiate(ty_id, &mut HashMap::new())
                 } else {
                     Err(tyerr(TypeErrorKind::UndeclaredType, span))?
                 }
@@ -758,16 +840,9 @@ impl Typechecker {
                 self.unify(ret_l, ret_r, span)?;
             }
 
-            (
-                Type::Struct {
-                    fields: fields_l, ..
-                },
-                Type::Struct {
-                    fields: fields_r, ..
-                },
-            ) => {
-                for (field_l, field_r) in fields_l.iter().zip(fields_r.iter()) {
-                    self.unify(field_l.1, field_r.1, span)?;
+            (Type::UserDef { args: args_l, .. }, Type::UserDef { args: args_r, .. }) => {
+                for (arg_l, arg_r) in args_l.iter().zip(args_r.iter()) {
+                    self.unify(*arg_l, *arg_r, span)?;
                 }
             }
 
@@ -807,6 +882,7 @@ impl Typechecker {
 
     // instantiate a generic type to a concrete one
     // generic arguments are converted to type variables
+    // TODO: consider using an HashMap<IdentId, FreshId> as it is cleaner
     fn ty_instantiate(&mut self, ty: TypeId, generics: &mut HashMap<IdentId, TypeId>) -> TypeId {
         match self.get_type(ty).clone() {
             Type::Func { params, ret, .. } => {
@@ -817,22 +893,31 @@ impl Typechecker {
                 let ret_instantiated = self.ty_instantiate(ret, generics);
 
                 self.add_type(Type::Func {
-                    generics: Default::default(),
                     params: instantiated,
                     ret: ret_instantiated,
                 })
             }
 
-            Type::Struct { name, fields, .. } => {
-                let instantiated = fields
+            Type::UserDef { name, args } => {
+                // let info = self
+                //     .structs
+                //     .get(&name)
+                //     .expect("cannot instantiate undeclared struct");
+                //
+                //                 let instantiated = info
+                //                     .fields
+                //                     .iter()
+                //                     .map(|f| (f.0, self.ty_instantiate(f.1, generics)))
+                //                     .collect();
+
+                let instanciated = args
                     .iter()
-                    .map(|f| (f.0, self.ty_instantiate(f.1, generics)))
+                    .map(|a| self.ty_instantiate(*a, generics))
                     .collect();
 
-                self.add_type(Type::Struct {
-                    generics: Default::default(),
+                self.add_type(Type::UserDef {
+                    args: instanciated,
                     name,
-                    fields: instantiated,
                 })
             }
 
@@ -845,6 +930,7 @@ impl Typechecker {
                     fresh
                 }
             }
+
             _ => ty,
         }
     }
@@ -858,7 +944,7 @@ impl Typechecker {
                 params.iter().any(|p| self.ty_occurs_check(*p, ty_var))
                     || self.ty_occurs_check(*ret, ty_var)
             }
-            Type::Struct { fields, .. } => fields.iter().any(|f| self.ty_occurs_check(f.1, ty_var)),
+            Type::UserDef { args, .. } => args.iter().any(|a| self.ty_occurs_check(*a, ty_var)),
             Type::TypeVar(inner_ty_var) => *inner_ty_var == ty_var,
         }
     }
@@ -889,16 +975,16 @@ pub fn typecheck(ast: &mut Ast) -> Typechecker {
     }
 
     // final pass to assign final types to variables declarations
-    for (stmt_id, ty_id) in &tc.vars_typed {
-        let annot = type_to_annotation(*ty_id, &tc, ast);
-        let (stmt, _) = ast.get_stmt_mut(*stmt_id);
-        match stmt {
-            Stmt::VarDecl(content) => {
-                content.ty = Some(annot);
-            }
-            _ => unreachable!(),
-        }
-    }
+    // for (stmt_id, ty_id) in &tc.vars_typed {
+    //     let annot = type_to_annotation(*ty_id, &tc, ast);
+    //     let (stmt, _) = ast.get_stmt_mut(*stmt_id);
+    //     match stmt {
+    //         Stmt::VarDecl(content) => {
+    //             content.ty = Some(annot);
+    //         }
+    //         _ => unreachable!(),
+    //     }
+    // }
 
     tc
 }

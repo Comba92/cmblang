@@ -34,7 +34,7 @@ impl Ast {
         &mut self.stmts[id.0 as usize]
     }
 
-    pub fn get_ident(&self, ident: IdentId) -> &str {
+    pub fn get_str(&self, ident: IdentId) -> &str {
         self.idents.get(ident.0)
     }
 

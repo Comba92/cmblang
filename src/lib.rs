@@ -37,14 +37,18 @@ impl Span {
     }
     // pub fn get_str<'a, 'b>(&'a self, src: &'b str) -> &'b str { &src[self.start as usize .. self.end as usize] }
 }
+
+// TODO: this datatype is retarted
+// T and Span/Position should stay in different arrays.
+// we only care about spans when errors occurs after all
 pub type Spanned<T> = (T, Span);
+pub type Positioned<T> = (T, Position);
 
 #[derive(Debug, Clone, Copy)]
 pub struct Position {
     pub line: u32,
     pub col: u32,
 }
-pub type Positioned<T> = (T, Position);
 
 pub mod UnionFind {
     #[derive(Default)]
