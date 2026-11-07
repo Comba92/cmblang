@@ -320,7 +320,7 @@ impl Parser {
                     )?;
 
                     // we sort the fields because they might come in any order
-                    fields.sort_by_key(|f| f.0);
+                    // fields.sort_by_key(|f| f.0);
 
                     self.add_expr(Expr::StructLiteral(ident, fields), c, tok)
                 } else {
@@ -817,7 +817,7 @@ impl Parser {
                 )?;
 
                 // we sort the fields because literals might list them in any order
-                fields.sort_by_key(|f| f.0);
+                // fields.sort_by_key(|f| f.0);
 
                 self.add_stmt(
                     Stmt::StructDecl(StructContent {

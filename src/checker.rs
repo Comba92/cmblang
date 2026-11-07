@@ -64,7 +64,7 @@ pub enum Type {
     Float,
     Bool,
     Generic(IdentId),
-    TypeVar(u32),
+    Unknown(u32),
     // Array {
     //     inner: TypeId,
     //     size: u32,
@@ -210,7 +210,7 @@ fn type_to_annotation(ty_id: TypeId, tc: &Typechecker, ast: &mut Ast) -> TyAnnot
             args: Default::default(),
         },
 
-        Type::TypeVar(_) => unreachable!("can't convert a type var to a type annotation"),
+        Type::Unknown(_) => unreachable!("can't convert a type var to a type annotation"),
 
         // we're supposed to get an instanciated function here??
         Type::Func { params, ret, .. } => {
@@ -257,9 +257,9 @@ impl Typechecker {
         TypeId(id as Id)
     }
 
-    fn add_ty_var(&mut self) -> TypeId {
+    fn add_unknown_ty(&mut self) -> TypeId {
         let id = self.substs.fresh();
-        self.add_type(Type::TypeVar(id))
+        self.add_type(Type::Unknown(id))
     }
 
     fn get_type(&self, id: TypeId) -> &Type {
@@ -282,40 +282,36 @@ impl Typechecker {
         let (annot, span) = ast.get_annot(annot_id);
         let ty = match annot {
             TyAnnot::Type { name, args } => {
-                if args.is_empty() {
-                    // it is either a primitive or generic parameter
+                let str = ast.get_str(*name);
+                match str {
+                    "bool" => return Ok(BOOL_ID),
+                    "int" => return Ok(INT_ID),
+                    "float" => return Ok(FLOAT_ID),
+                    _ => {
+                        // it is either a primitive or generic parameter
+                        if let Some(struct_info) = self.structs.get(name) {
+                            if struct_info.generics.len() != args.len() {
+                                Err(tyerr(TypeErrorKind::WrongTypeArgumentsCount, span))?
+                            }
 
-                    let str = ast.get_str(*name);
-                    match str {
-                        "bool" => return Ok(BOOL_ID),
-                        "int" => return Ok(INT_ID),
-                        "float" => return Ok(FLOAT_ID),
-                        _ => {
+                            let mut list = Vec::new();
+                            for arg in args {
+                                let ty_id = self.add_type_from_annotation(ast, *arg)?;
+                                list.push(ty_id);
+                            }
+
+                            Type::UserDef {
+                                args: list.into(),
+                                name: *name,
+                            }
+                        } else {
                             // it has to be a generic parameter
                             //
                             // TODO: check inside generics pool
                             return Ok(self.add_type(Type::Generic(*name)));
+                            // Err(tyerr(TypeErrorKind::UndeclaredType, span))?
                         }
-                    };
-                }
-
-                if let Some(struct_info) = self.structs.get(name) {
-                    if struct_info.generics.len() != args.len() {
-                        Err(tyerr(TypeErrorKind::WrongTypeArgumentsCount, span))?
                     }
-
-                    let mut list = Vec::new();
-                    for arg in args {
-                        let ty_id = self.add_type_from_annotation(ast, *arg)?;
-                        list.push(ty_id);
-                    }
-
-                    Type::UserDef {
-                        args: list.into(),
-                        name: *name,
-                    }
-                } else {
-                    Err(tyerr(TypeErrorKind::UndeclaredType, span))?
                 }
             }
 
@@ -452,10 +448,10 @@ impl Typechecker {
                     fields.push((field.0, self.add_type_from_annotation(ast, field.1)?));
                 }
 
-                let mut generics = Vec::new();
-                for generic in &content.generics {
-                    generics.push(self.add_type(Type::Generic(*generic)));
-                }
+                // let mut generics = Vec::new();
+                // for generic in &content.generics {
+                //     generics.push(self.add_type(Type::Generic(*generic)));
+                // }
 
                 // TODO: do we really have to do this?
                 // or do we always query for struct info?
@@ -595,30 +591,33 @@ impl Typechecker {
                     .lookup(*name)
                     .ok_or_else(|| tyerr(TypeErrorKind::UndeclaredVar, span))?;
 
+                // for some reason we have to do this
+                // bet its because if a variable is a generic, we would instantiate it,
                 let res = match self.get_type(ty) {
-                    Type::Func { params, ret } => {
-                        //                         let info = self.funcs.get(name).unwrap().clone();
-                        //
-                        //                         let mut map = info
-                        //                             .generics
-                        //                             .iter()
-                        //                             .map(|g| (*g, self.add_ty_var()))
-                        //                             .collect();
-                        self.ty_instantiate(ty, &mut HashMap::new())
-                    }
-
-                    Type::UserDef { args, name } => {
-                        // let info = self.structs.get(&name).unwrap().clone();
-                        // let mut map = info
-                        //     .generics
-                        //     .iter()
-                        //     .map(|g| (*g, self.add_ty_var()))
-                        //     .collect();
-                        self.ty_instantiate(ty, &mut HashMap::new())
-                    }
-
-                    _ => ty,
+                    //                     Type::Func { params, ret } => {
+                    //                         //                         let info = self.funcs.get(name).unwrap().clone();
+                    //                         //
+                    //                         //                         let mut map = info
+                    //                         //                             .generics
+                    //                         //                             .iter()
+                    //                         //                             .map(|g| (*g, self.add_ty_var()))
+                    //                         //                             .collect();
+                    //                         self.ty_instantiate(ty, &mut HashMap::new())
+                    //                     }
+                    //
+                    //                     Type::UserDef { args, name } => {
+                    //                         // let info = self.structs.get(&name).unwrap().clone();
+                    //                         // let mut map = info
+                    //                         //     .generics
+                    //                         //     .iter()
+                    //                         //     .map(|g| (*g, self.add_ty_var()))
+                    //                         //     .collect();
+                    //                         self.ty_instantiate(ty, &mut HashMap::new())
+                    //                     }
+                    Type::Generic(_) => ty, // if we're getting a generic from a variable, it means we are inside a function declaration. WE DON'T HAVE to instantiate it
+                    _ => self.ty_instantiate(ty, &mut HashMap::new()),
                 };
+
                 res
 
                 // TODO: this doesnt work
@@ -653,6 +652,10 @@ impl Typechecker {
 
                 let ty_id = self.infer(ast, *callee)?;
                 match self.get_type(ty_id).clone() {
+                    Type::Unknown(id) => {
+                        todo!("figure this one out");
+                    }
+
                     Type::Func { params, ret } => {
                         // let instance_id = self.ty_instantiate(ty_id, &mut HashMap::new());
                         // let Type::Func { params, ret, .. } = self.get_type(instance_id).clone()
@@ -673,8 +676,6 @@ impl Typechecker {
                         ret
                     }
 
-                    // TODO: handle this
-                    // Type::TypeVar(id) => {}
                     _ => Err(tyerr(TypeErrorKind::CallingWithWrongType, span))?,
                 }
             }
@@ -687,26 +688,36 @@ impl Typechecker {
                     //     unreachable!()
                     // };
 
+                    if info.fields.len() != args.len() {
+                        return Err(tyerr(TypeErrorKind::WrongStructLiteralCount, span));
+                    }
+
                     // we must clone to both access fields and do check
+                    let mut generics = Vec::new();
                     for ((field_name, field_ty), (value_name, value)) in
                         info.fields.iter().zip(args.iter())
                     {
                         if field_name != value_name {
                             return Err(tyerr(TypeErrorKind::WrongStructLiteralField, span));
                         }
-                        self.check(ast, *value, *field_ty)?;
-                    }
 
-                    if info.fields.len() != args.len() {
-                        return Err(tyerr(TypeErrorKind::WrongStructLiteralCount, span));
+                        match self.get_type(*field_ty) {
+                            Type::Generic(_) => {
+                                // let id = self.add_unknown_ty();
+                                // self.check(ast, *value, id)?
+                                let value_ty = self.infer(ast, *value)?;
+                                generics.push(value_ty);
+                            }
+                            _ => self.check(ast, *value, *field_ty)?,
+                        };
                     }
 
                     let ty_id = self.add_type(Type::UserDef {
-                        args: Default::default(),
+                        args: generics.into(),
                         name: *name,
                     });
 
-                    self.ty_instantiate(ty_id, &mut HashMap::new())
+                    ty_id
                 } else {
                     Err(tyerr(TypeErrorKind::UndeclaredType, span))?
                 }
@@ -765,7 +776,7 @@ impl Typechecker {
         let ty_b = self.get_type(ty_id_b).clone();
 
         match (ty_a, ty_b) {
-            (Type::TypeVar(x), Type::TypeVar(y)) => {
+            (Type::Unknown(x), Type::Unknown(y)) => {
                 if x != y {
                     return Err(tyerr(
                         TypeErrorKind::TypeMismatch {
@@ -777,7 +788,7 @@ impl Typechecker {
                 }
             }
 
-            (Type::TypeVar(x), _) => {
+            (Type::Unknown(x), _) => {
                 if self.ty_occurs_check(ty_id_b, x) {
                     return Err(tyerr(
                         TypeErrorKind::InfiniteType {
@@ -790,7 +801,7 @@ impl Typechecker {
                     self.ty_substitute(x, ty_id_b);
                 }
             }
-            (_, Type::TypeVar(x)) => {
+            (_, Type::Unknown(x)) => {
                 if self.ty_occurs_check(ty_id_a, x) {
                     return Err(tyerr(
                         TypeErrorKind::InfiniteType {
@@ -863,7 +874,7 @@ impl Typechecker {
     // get the solved type from a type variable
     fn ty_normalize(&mut self, ty: TypeId) -> TypeId {
         match self.get_type(ty) {
-            Type::TypeVar(x) => {
+            Type::Unknown(x) => {
                 if let Some(parent) = self.substs.0[*x as usize] {
                     self.ty_normalize(parent)
                 } else {
@@ -925,7 +936,7 @@ impl Typechecker {
                 if let Some(fresh) = generics.get(&name) {
                     *fresh
                 } else {
-                    let fresh = self.add_ty_var();
+                    let fresh = self.add_unknown_ty();
                     generics.insert(name, fresh);
                     fresh
                 }
@@ -945,7 +956,7 @@ impl Typechecker {
                     || self.ty_occurs_check(*ret, ty_var)
             }
             Type::UserDef { args, .. } => args.iter().any(|a| self.ty_occurs_check(*a, ty_var)),
-            Type::TypeVar(inner_ty_var) => *inner_ty_var == ty_var,
+            Type::Unknown(inner_ty_var) => *inner_ty_var == ty_var,
         }
     }
 }
