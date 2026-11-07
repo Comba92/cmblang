@@ -21,8 +21,9 @@ pub type List<T> = Box<[T]>;
 #[derive(Debug, Clone)]
 // Statements indexes are [start, end)
 pub struct Block {
-    pub start: StmtId,
-    pub end: StmtId,
+    // pub start: StmtId,
+    // pub end: StmtId,
+    pub list: List<StmtId>,
 }
 
 // TODO: expressions are not added in order. no way to do superflat opt right now
@@ -87,7 +88,7 @@ pub enum Expr {
 #[derive(Debug)]
 pub enum TyAnnot {
     // Void,
-    Hole,
+    // Hole,
     Type {
         name: IdentId,
         args: List<TyAnnotId>,
@@ -174,30 +175,6 @@ fn err_span(err: ParseErrorKind, span: Span) -> ParseError {
 }
 fn err_tok(err: ParseErrorKind, tok: Token) -> ParseError {
     err_span(err, tok.to_span())
-}
-
-pub fn render_parse_err(lex: &Lexer, e: &ParseError) -> String {
-    // TODO: line offsets might be retarded, just get the current line until the newline?
-
-    let pos_start = lex.pos_from_offset(e.1.start);
-    let pos_end = lex.pos_from_offset(e.1.end);
-
-    let curr_line = lex.str_line_from_pos(&pos_start).trim();
-    let filename = "test.cmb"; // TODO: add filename here
-
-    let mut str = format!("error: {:?} ", e.0);
-    str += &format!("at {filename}:{}:{}\n", pos_start.line, pos_start.col);
-    str += &format!("\t{curr_line}\n");
-
-    let left = " ".repeat(pos_start.col.saturating_sub(1) as usize);
-    let underline = "^".repeat(e.1.len() as usize);
-    str += &format!("\t{left}{underline}");
-
-    if pos_start.line != pos_end.line {
-    } else {
-    }
-
-    str
 }
 
 type ParseError = Spanned<ParseErrorKind>;
@@ -586,7 +563,7 @@ impl Parser {
                 Ok(item) => list.push(item),
                 Err(e) => {
                     self.report_error(c, e);
-                    c.recover(&[separator, terminator]);
+                    // c.recover(&[separator, terminator]);
                 }
             }
 
@@ -610,6 +587,7 @@ impl Parser {
         let start = StmtId(self.stmts.len() as Id);
         let start_tok = c.prev();
 
+        let mut list = Vec::new();
         let mut is_closed = false;
         while c.has_some() {
             if c.eat(TokenKind::BraceR).is_some() {
@@ -617,8 +595,8 @@ impl Parser {
                 break;
             }
 
-            match self.parse_inner_stmt(c) {
-                Ok(_) => {}
+            match self.parse_stmt(c) {
+                Ok(id) => list.push(id),
                 Err(e) => {
                     self.report_error(c, e);
                     c.recover(&[TokenKind::Semicolon, TokenKind::BraceR]);
@@ -631,7 +609,7 @@ impl Parser {
         }
 
         let end = StmtId(self.stmts.len() as Id);
-        Ok(Block { start, end })
+        Ok(Block { list: list.into() })
     }
 
     fn parse_var_decl(&mut self, c: &mut ParseCursor, start: Token) -> ParseResult<StmtId> {
@@ -661,7 +639,7 @@ impl Parser {
         Ok(self.add_stmt(stmt, c, start))
     }
 
-    fn parse_inner_stmt(&mut self, c: &mut ParseCursor) -> ParseResult<StmtId> {
+    fn parse_stmt(&mut self, c: &mut ParseCursor) -> ParseResult<StmtId> {
         let tok = c.advance();
 
         let id = match tok.kind {
@@ -674,40 +652,12 @@ impl Parser {
                 self.add_stmt(Stmt::Expr(ret), c, tok)
             }
 
-            TokenKind::Invalid => return Err(err_tok(ParseErrorKind::InvalidCharacter, tok)),
-            TokenKind::Eof => return Err(err_tok(ParseErrorKind::ReachedEof, tok)),
-
-            _ => {
-                // try to parse expression
-                c.undo();
-                let expr = self.parse_expr(c, 0)?;
-                // TODO: Handle malformed expressions
-                // match self.get_expr(expr) {
-                //     Expr::Variable(_) => {
-                //         return Err(MalformedExpression(c.lex.token_pos(c.prev())));
-                //     }
-                //     _ => {}
-                // }
-                c.expect_semicolon("expression")?;
-                self.add_stmt(Stmt::Expr(expr), c, tok)
-            }
-        };
-
-        Ok(id)
-    }
-
-    fn parse_top_stmt(&mut self, c: &mut ParseCursor) -> ParseResult<StmtId> {
-        let tok = c.advance();
-
-        let id = match tok.kind {
-            TokenKind::Let => self.parse_var_decl(c, tok)?,
             TokenKind::Fn => {
                 let name_tok = c.expect(
                     TokenKind::Ident,
-                    &[TokenKind::ParenL, TokenKind::ParenR, TokenKind::BraceL],
+                    &[TokenKind::ParenR, TokenKind::BraceR],
                     || "fn token",
                 )?;
-
                 let name = self.add_ident(c, name_tok);
 
                 let generics = if c.eat(TokenKind::Less).is_some() {
@@ -715,13 +665,7 @@ impl Parser {
                         c,
                         TokenKind::Comma,
                         TokenKind::Great,
-                        |p, c| {
-                            p.parse_ident(
-                                c,
-                                &[TokenKind::Comma, TokenKind::Great, TokenKind::ParenL],
-                                "function generics list",
-                            )
-                        },
+                        |p, c| p.parse_ident(c, &[TokenKind::Comma], "function generics list"),
                         ListingKind::TypeGenericsAnnot,
                     )?
                 } else {
@@ -848,11 +792,172 @@ impl Parser {
 
             TokenKind::Invalid => return Err(err_tok(ParseErrorKind::InvalidCharacter, tok)),
             TokenKind::Eof => return Err(err_tok(ParseErrorKind::ReachedEof, tok)),
-            _ => return Err(err_tok(ParseErrorKind::InvalidStmtInGlobal, tok)),
+
+            _ => {
+                // try to parse expression
+                c.undo();
+                let expr = self.parse_expr(c, 0)?;
+                // TODO: Handle malformed expressions
+                // match self.get_expr(expr) {
+                //     Expr::Variable(_) => {
+                //         return Err(MalformedExpression(c.lex.token_pos(c.prev())));
+                //     }
+                //     _ => {}
+                // }
+                c.expect_semicolon("expression")?;
+                self.add_stmt(Stmt::Expr(expr), c, tok)
+            }
         };
 
         Ok(id)
     }
+
+    //     fn parse_top_stmt(&mut self, c: &mut ParseCursor) -> ParseResult<StmtId> {
+    //         let tok = c.advance();
+    //
+    //         let id = match tok.kind {
+    //             TokenKind::Let => self.parse_var_decl(c, tok)?,
+    //             TokenKind::Fn => {
+    //                 let name_tok = c.expect(TokenKind::Ident, &[TokenKind::BraceR], || "fn token")?;
+    //                 let name = self.add_ident(c, name_tok);
+    //
+    //                 let generics = if c.eat(TokenKind::Less).is_some() {
+    //                     self.parse_listing(
+    //                         c,
+    //                         TokenKind::Comma,
+    //                         TokenKind::Great,
+    //                         |p, c| p.parse_ident(c, &[TokenKind::Comma], "function generics list"),
+    //                         ListingKind::TypeGenericsAnnot,
+    //                     )?
+    //                 } else {
+    //                     Box::default()
+    //                 };
+    //
+    //                 c.expect(
+    //                     TokenKind::ParenL,
+    //                     &[TokenKind::ParenR, TokenKind::BraceL],
+    //                     || "function identifier or generics list",
+    //                 )?;
+    //
+    //                 let params = self.parse_listing(
+    //                     c,
+    //                     TokenKind::Comma,
+    //                     TokenKind::ParenR,
+    //                     |p, c| {
+    //                         let name = p.parse_ident(
+    //                             c,
+    //                             &[TokenKind::Comma, TokenKind::ParenR, TokenKind::BraceL],
+    //                             "function parameters start",
+    //                         )?;
+    //                         c.expect(
+    //                             TokenKind::Colon,
+    //                             &[TokenKind::Comma, TokenKind::ParenR, TokenKind::BraceL],
+    //                             || "function parameter identifier",
+    //                         )?;
+    //                         Ok((name, p.parse_ty_annot(c)?))
+    //                     },
+    //                     ListingKind::FuncParamsAnnot,
+    //                 )?;
+    //
+    //                 let ret = if c.eat(TokenKind::Arrow).is_some() {
+    //                     Some(self.parse_ty_annot(c)?)
+    //                 } else {
+    //                     None
+    //                 };
+    //
+    //                 c.expect(
+    //                     TokenKind::BraceL,
+    //                     &[
+    //                         TokenKind::BraceR,
+    //                         TokenKind::Let,
+    //                         TokenKind::Fn,
+    //                         TokenKind::Struct,
+    //                     ],
+    //                     || "function parameters closing or function return type",
+    //                 )?;
+    //                 let code = self.parse_block(c)?;
+    //
+    //                 self.add_stmt(
+    //                     Stmt::FuncDecl(FuncContent {
+    //                         name,
+    //                         generics,
+    //                         params,
+    //                         ret,
+    //                         code,
+    //                     }),
+    //                     c,
+    //                     tok,
+    //                 )
+    //             }
+    //
+    //             TokenKind::Struct => {
+    //                 let name =
+    //                     self.parse_ident(c, &[TokenKind::BraceL, TokenKind::BraceR], "struct token")?;
+    //
+    //                 let generics = if c.eat(TokenKind::Less).is_some() {
+    //                     self.parse_listing(
+    //                         c,
+    //                         TokenKind::Comma,
+    //                         TokenKind::Great,
+    //                         |p, c| {
+    //                             p.parse_ident(
+    //                                 c,
+    //                                 &[TokenKind::Great, TokenKind::Comma, TokenKind::BraceL],
+    //                                 "struct generics list",
+    //                             )
+    //                         },
+    //                         ListingKind::TypeGenericsAnnot,
+    //                     )?
+    //                 } else {
+    //                     Box::default()
+    //                 };
+    //
+    //                 c.expect(
+    //                     TokenKind::BraceL,
+    //                     &[TokenKind::BraceR],
+    //                     || "struct declaration identifier",
+    //                 )?;
+    //                 let mut fields = self.parse_listing(
+    //                     c,
+    //                     TokenKind::Comma,
+    //                     TokenKind::BraceR,
+    //                     |p, c| {
+    //                         let name = p.parse_ident(
+    //                             c,
+    //                             &[TokenKind::Comma, TokenKind::BraceR],
+    //                             "struct fields",
+    //                         )?;
+    //                         c.expect(
+    //                             TokenKind::Colon,
+    //                             &[TokenKind::Comma, TokenKind::BraceR],
+    //                             &|| "struct field name",
+    //                         )?;
+    //                         Ok((name, p.parse_ty_annot(c)?))
+    //                     },
+    //                     ListingKind::StructFields,
+    //                 )?;
+    //
+    //                 // we sort the fields because literals might list them in any order
+    //                 // fields.sort_by_key(|f| f.0);
+    //
+    //                 self.add_stmt(
+    //                     Stmt::StructDecl(StructContent {
+    //                         name,
+    //                         generics,
+    //                         fields,
+    //                     }),
+    //                     c,
+    //                     tok,
+    //                 )
+    //             }
+    //
+    //             TokenKind::Invalid => return Err(err_tok(ParseErrorKind::InvalidCharacter, tok)),
+    //             TokenKind::Eof => return Err(err_tok(ParseErrorKind::ReachedEof, tok)),
+    //             _ => return Err(err_tok(ParseErrorKind::InvalidStmtInGlobal, tok)),
+    //         };
+    //
+    //         Ok(id)
+    //     }
 }
 
 struct ParseCursor<'a> {
@@ -896,7 +1001,7 @@ impl<'a> ParseCursor<'a> {
     }
 
     fn span(&self, start_tok: Token) -> Span {
-        start_tok.to_span().merge(&self.prev().to_span())
+        start_tok.to_span().merge(&self.peek().to_span())
     }
 
     fn expect<S: Into<String>, M: FnOnce() -> S>(
@@ -910,10 +1015,15 @@ impl<'a> ParseCursor<'a> {
         } else {
             let tok = self.peek();
 
-            let mut anchors = anchors.to_vec();
-            anchors.push(target);
+            // we dont add ident to anchors because it causes problems
+            if target != TokenKind::Ident {
+                let mut anchors = anchors.to_vec();
+                anchors.push(target);
+                self.recover(&anchors);
+            } else {
+                self.recover(&anchors);
+            };
 
-            self.recover(&anchors);
             self.eat(target); // we still check for the target after recovering
 
             let err = err_span(
@@ -967,6 +1077,9 @@ impl<'a> ParseCursor<'a> {
         if !self.has_some() {
             // stay pointing at EOF token
             self.undo();
+        } else {
+            // else consume the anchor
+            self.advance();
         }
     }
 }
@@ -976,11 +1089,10 @@ pub fn parse(lex: &Lexer) -> Parser {
     let mut c = ParseCursor::new(lex);
 
     while c.has_some() {
-        match p.parse_top_stmt(&mut c) {
+        match p.parse_stmt(&mut c) {
             Ok(id) => p.global_stmts.push(id),
             Err(e) => {
                 p.report_error(&mut c, e);
-                c.recover(&[TokenKind::Semicolon, TokenKind::BraceR]);
             }
         }
     }

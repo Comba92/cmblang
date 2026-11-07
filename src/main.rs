@@ -1,20 +1,30 @@
 use cmblang::*;
-use std::{fs, io};
+use std::{
+    fs,
+    io::{self, Write},
+};
 
 fn main() {
-    println!("Hello!");
+    let mut out = String::new();
 
     let test = fs::read_to_string("test.cmb").unwrap();
     let lex = scan(test).unwrap();
 
     let parser = parse(&lex);
-    for err in parser.errors {
-        println!("{}", render_parse_err(&lex, &err));
+    for err in &parser.errors {
+        out += &render_err(&lex, &err.0, err.1);
+        out += "\n";
     }
 
-    // let mut ast = Ast::new(lex, parser);
-    // let checker = typecheck(&mut ast);
+    let mut ast = Ast::new(lex, parser);
+    let checker = typecheck(&mut ast);
 
+    for err in &checker.errors {
+        out += &render_err(&ast.lex, &err.0, err.1);
+        out += "\n";
+    }
+
+    io::stdout().lock().write_all(out.as_bytes()).unwrap();
     //     println!("{:?}", checker.types);
     //     println!("{:?}", checker.funcs);
     //     println!("{:?}", checker.structs);

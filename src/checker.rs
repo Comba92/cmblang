@@ -262,13 +262,6 @@ impl Typechecker {
     }
 
     fn report_error(&mut self, ast: &Ast, e: TypeError) {
-        eprintln!(
-            "{:?} {:?} {:?} {:?}",
-            ast.lex.str_from_span(&e.1),
-            e.0,
-            ast.lex.pos_from_offset(e.1.start),
-            ast.lex.pos_from_offset(e.1.end)
-        );
         self.errors.push(e);
     }
 
@@ -413,6 +406,7 @@ impl Typechecker {
                 };
 
                 let ty_id = self.add_type(ty);
+
                 self.funcs.insert(
                     content.name,
                     FuncInfo {
@@ -478,33 +472,50 @@ impl Typechecker {
             Stmt::VarDecl(content) => self.var_decl(ast, content, stmt_id, span)?,
 
             Stmt::FuncDecl(content) => {
-                let func = self
-                    .env
-                    .lookup(content.name)
+                //                 let func = self
+                //                     .env
+                //                     .lookup(content.name)
+                //                     .ok_or_else(|| tyerr(TypeErrorKind::UndeclaredVar, span))?;
+                //
+                //                 match self.get_type(func).clone() {
+                //                     Type::Func {
+                //                         params,
+                //                         ret: ret_expected,
+                //                         ..
+                //                     } => {
+                //                         self.env.push_scope();
+                //                         for (param_ty, param_content) in params.iter().zip(content.params.iter()) {
+                //                             self.env.bind(param_content.0, *param_ty);
+                //                         }
+                //
+                //                         let ret_actual = self.infer_block(ast, &content.code);
+                //                         self.env.pop_scope();
+                //
+                //                         let ret_actual = ret_actual?;
+                //                         self.unify(ret_actual, ret_expected, span)?;
+                //                     }
+                //
+                //                     _ => unreachable!(
+                //                         "function type should already be in global scope after name resolution pass"
+                //                     ),
+                //                 }
+
+                let info = self
+                    .funcs
+                    .get(&content.name)
                     .ok_or_else(|| tyerr(TypeErrorKind::UndeclaredVar, span))?;
 
-                match self.get_type(func).clone() {
-                    Type::Func {
-                        params,
-                        ret: ret_expected,
-                        ..
-                    } => {
-                        self.env.push_scope();
-                        for (param_ty, param_content) in params.iter().zip(content.params.iter()) {
-                            self.env.bind(param_content.0, *param_ty);
-                        }
-
-                        let ret_actual = self.infer_block(ast, &content.code);
-                        self.env.pop_scope();
-
-                        let ret_actual = ret_actual?;
-                        self.unify(ret_actual, ret_expected, span)?;
-                    }
-
-                    _ => unreachable!(
-                        "function type should already be in global scope after name resolution pass"
-                    ),
+                self.env.push_scope();
+                for (param_ty, param_content) in info.params.iter().zip(content.params.iter()) {
+                    self.env.bind(param_content.0, *param_ty);
                 }
+
+                let ret_expected = info.ret;
+                let ret_actual = self.infer_block(ast, &content.code);
+                self.env.pop_scope();
+
+                let ret_actual = ret_actual?;
+                self.unify(ret_actual, ret_expected, span)?;
             }
 
             Stmt::StructDecl(_) => {} // Do nothing, already done in top level pass
@@ -521,9 +532,8 @@ impl Typechecker {
     fn infer_block(&mut self, ast: &Ast, block: &Block) -> TypeResult<TypeId> {
         let mut ret_ty = None;
 
-        let mut stmt_iter = block.start.0;
-        while stmt_iter < block.end.0 {
-            let stmt_id = StmtId(stmt_iter);
+        for stmt_id in block.list.iter().copied() {
+            // let stmt_id = StmtId(stmt_iter);
             let (stmt, span) = ast.get_stmt(stmt_id);
             match stmt {
                 Stmt::VarDecl(content) => self.var_decl(ast, content, stmt_id, span)?,
@@ -560,7 +570,7 @@ impl Typechecker {
                 }
             };
 
-            stmt_iter += 1;
+            // stmt_iter += 1;
         }
 
         // if we didn't find any return types, this block has type void

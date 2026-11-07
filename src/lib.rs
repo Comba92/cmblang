@@ -1,12 +1,12 @@
 pub mod ast;
-// pub mod checker;
+pub mod checker;
 // pub mod emitter;
 mod intern;
 pub mod lexer;
 pub mod parser;
 
 pub use ast::*;
-// pub use checker::*;
+pub use checker::*;
 // pub use emitter::*;
 pub use lexer::*;
 pub use parser::*;
@@ -46,8 +46,50 @@ pub type Positioned<T> = (T, Position);
 
 #[derive(Debug, Clone, Copy)]
 pub struct Position {
-    pub line: u32,
-    pub col: u32,
+    pub line_start: u32,
+    pub line_end: u32,
+    pub col_start: u32,
+    pub col_end: u32,
+}
+
+pub fn render_err<E: std::fmt::Debug>(lex: &Lexer, e: &E, span: Span) -> String {
+    // TODO: line offsets might be retarded, just get the current line until the newline?
+
+    //     let line_start = lex
+    //         .input
+    //         .char_indices()
+    //         .take(e.1.start as usize)
+    //         .find_map(|(i, c)| (c == '\n').then(|| i as u32))
+    //         .unwrap_or(0);
+    //
+    //     let line_end = lex
+    //         .input
+    //         .char_indices()
+    //         .skip(e.1.start as usize)
+    //         .find_map(|(i, c)| (c == '\n').then(|| i as u32))
+    //         .unwrap_or(lex.input.len() as u32);
+
+    // let curr_line = lex
+    //     .str_from_span(Span {
+    //         start: line_start,
+    //         end: line_end,
+    //     })
+    //     .trim();
+
+    let pos = lex.pos_from_span(span);
+    let curr_line = lex.str_line_from_pos(&pos);
+    let filename = "test.cmb"; // TODO: add filename here
+
+    let mut str = format!("error: {:?} ", e);
+    str += &format!("at {filename}:{}:{}\n", pos.line_start, pos.col_start);
+    str += &format!("\t{curr_line}\n");
+
+    let max_underline_len = (curr_line.len() as u32).saturating_sub(pos.col_start) + 1;
+    let left = " ".repeat(pos.col_start.saturating_sub(1) as usize);
+    let underline = "^".repeat(span.len().min(max_underline_len) as usize);
+    str += &format!("\t{left}{underline}");
+
+    str
 }
 
 pub mod UnionFind {

@@ -189,6 +189,15 @@ pub struct Token {
     pub len: u16,
     pub start: u32,
 }
+impl Default for Token {
+    fn default() -> Self {
+        Self {
+            kind: TokenKind::Invalid,
+            start: 0,
+            len: 0,
+        }
+    }
+}
 impl Token {
     pub fn new(kind: TokenKind, start: u32, end: u32) -> Self {
         let len = end - start;
@@ -210,7 +219,7 @@ impl Token {
 #[derive(Debug)]
 pub enum LexError {
     InputTooBig,
-    TokenTooBig(Span),
+    TokenTooBig(Position),
     UnclosedBlockComment(Position),
 }
 
@@ -248,10 +257,22 @@ impl Lexer {
     }
 
     pub fn pos_from_tok(&self, tok: Token) -> Position {
-        self.pos_from_offset(tok.start)
+        self.pos_from_span(tok.to_span())
     }
 
-    pub fn pos_from_offset(&self, offset: u32) -> Position {
+    pub fn pos_from_span(&self, span: Span) -> Position {
+        let (line_start, col_start) = self.pos_from_offset(span.start);
+        let (line_end, col_end) = self.pos_from_offset(span.end);
+
+        Position {
+            line_start,
+            line_end,
+            col_start,
+            col_end,
+        }
+    }
+
+    fn pos_from_offset(&self, offset: u32) -> (u32, u32) {
         let line = match self.line_offsets.binary_search(&offset) {
             // token starts exactly at line, return as is
             Ok(idx) => idx,
@@ -261,17 +282,14 @@ impl Lexer {
         };
 
         let column = (offset - self.line_offsets[line]) as usize;
-        Position {
-            line: 1 + line as u32,
-            col: column as u32,
-        }
+        (1 + line as u32, column as u32)
     }
 
     pub fn str_line_from_pos(&self, pos: &Position) -> &str {
         &self
             .input
             .lines()
-            .nth(pos.line as usize - 1)
+            .nth(pos.line_start as usize - 1)
             .unwrap_or_default()
     }
 }
@@ -423,7 +441,11 @@ pub fn scan(input: String) -> Result<Lexer, LexError> {
                         }
 
                         if depth > 0 {
-                            let pos = lex.pos_from_offset(start);
+                            let pos = lex.pos_from_span(Span {
+                                start,
+                                end: cursor.pos,
+                            });
+
                             return Err(LexError::UnclosedBlockComment(pos));
                         }
 
