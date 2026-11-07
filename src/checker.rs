@@ -63,6 +63,7 @@ pub enum Type {
     Integer,
     Float,
     Bool,
+    // Hole,
     Generic(IdentId),
     Unknown(u32),
     // Array {
@@ -76,7 +77,6 @@ pub enum Type {
 
 #[derive(Debug, Clone)]
 pub struct StructInfo {
-    // ty_id: TypeId,
     generics: List<IdentId>,
     name: IdentId,
     fields: List<(IdentId, TypeId)>,
@@ -84,7 +84,6 @@ pub struct StructInfo {
 
 #[derive(Debug, Clone)]
 pub struct FuncInfo {
-    ty_id: TypeId, // TODO: is this needed?
     generics: List<IdentId>,
     params: List<TypeId>,
     ret: TypeId,
@@ -94,12 +93,14 @@ const VOID_ID: TypeId = TypeId(0);
 const BOOL_ID: TypeId = TypeId(1);
 const INT_ID: TypeId = TypeId(2);
 const FLOAT_ID: TypeId = TypeId(3);
+const HOLE_ID: TypeId = TypeId(4);
 
 const PRIMITIVES: &[(Type, TypeId)] = &[
     (Type::Void, VOID_ID),
     (Type::Bool, BOOL_ID),
     (Type::Integer, INT_ID),
     (Type::Float, FLOAT_ID),
+    // (Type::Hole, HOLE_ID),
 ];
 
 #[derive(Debug)]
@@ -226,21 +227,15 @@ fn type_to_annotation(ty_id: TypeId, tc: &Typechecker, ast: &mut Ast) -> TyAnnot
                 ret: Some(ret),
             }
         }
-        Type::UserDef {
-            name,
-            args: generics,
-        } => {
-            todo!("struct to annotation not implemented");
-            //             let mut list = Vec::new();
-            //             for (name, ty) in fields {
-            //                 list.push(type_to_annotation(*ty, tc, ast));
-            //             }
-            //
-            //             // we're supposed to get back the generics here?
-            //             TyAnnot::Type {
-            //                 name: *name,
-            //                 args: (),
-            //             }
+        Type::UserDef { name, args } => {
+            // we're supposed to get back the generics here?
+            TyAnnot::Type {
+                name: *name,
+                args: args
+                    .iter()
+                    .map(|a| type_to_annotation(*a, tc, ast))
+                    .collect(),
+            }
         } // Type::Array { inner, size } => TyAnnot::Array {
           //     inner: type_to_annotation(*inner, tc, ast),
           //     size: todo!("array types not implemented yet"),
@@ -306,7 +301,7 @@ impl Typechecker {
                             }
                         } else {
                             // it has to be a generic parameter
-                            //
+
                             // TODO: check inside generics pool
                             return Ok(self.add_type(Type::Generic(*name)));
                             // Err(tyerr(TypeErrorKind::UndeclaredType, span))?
@@ -421,7 +416,6 @@ impl Typechecker {
                 self.funcs.insert(
                     content.name,
                     FuncInfo {
-                        ty_id,
                         generics: content.generics.clone(),
                         params: params.into(),
                         ret,
@@ -593,34 +587,12 @@ impl Typechecker {
 
                 // for some reason we have to do this
                 // bet its because if a variable is a generic, we would instantiate it,
-                let res = match self.get_type(ty) {
-                    //                     Type::Func { params, ret } => {
-                    //                         //                         let info = self.funcs.get(name).unwrap().clone();
-                    //                         //
-                    //                         //                         let mut map = info
-                    //                         //                             .generics
-                    //                         //                             .iter()
-                    //                         //                             .map(|g| (*g, self.add_ty_var()))
-                    //                         //                             .collect();
-                    //                         self.ty_instantiate(ty, &mut HashMap::new())
-                    //                     }
-                    //
-                    //                     Type::UserDef { args, name } => {
-                    //                         // let info = self.structs.get(&name).unwrap().clone();
-                    //                         // let mut map = info
-                    //                         //     .generics
-                    //                         //     .iter()
-                    //                         //     .map(|g| (*g, self.add_ty_var()))
-                    //                         //     .collect();
-                    //                         self.ty_instantiate(ty, &mut HashMap::new())
-                    //                     }
+                match self.get_type(ty) {
                     Type::Generic(_) => ty, // if we're getting a generic from a variable, it means we are inside a function declaration. WE DON'T HAVE to instantiate it
                     _ => self.ty_instantiate(ty, &mut HashMap::new()),
-                };
+                }
 
-                res
-
-                // TODO: this doesnt work
+                // this doesnt work because it also instantiates generics, which we dont want here
                 // self.ty_instantiate(ty, &mut HashMap::new())
             }
 
@@ -645,11 +617,6 @@ impl Typechecker {
             }
 
             Expr::Call { callee, args } => {
-                // TODO: problem arises if the callee is a type variable.
-                // Example: fn id<T>(T x) -> T { return x; }
-                // let a = id;
-                // As id is a generic function, it is not an instantiated type, so calling a returns a type variable
-
                 let ty_id = self.infer(ast, *callee)?;
                 match self.get_type(ty_id).clone() {
                     Type::Unknown(id) => {
@@ -657,12 +624,6 @@ impl Typechecker {
                     }
 
                     Type::Func { params, ret } => {
-                        // let instance_id = self.ty_instantiate(ty_id, &mut HashMap::new());
-                        // let Type::Func { params, ret, .. } = self.get_type(instance_id).clone()
-                        // else {
-                        //     unreachable!()
-                        // };
-
                         // we must clone to both access params and do check
                         for (param, arg) in params.iter().zip(args.iter()) {
                             self.check(ast, *arg, *param)?;
@@ -682,12 +643,6 @@ impl Typechecker {
 
             Expr::StructLiteral(name, args) => {
                 if let Some(info) = self.structs.get(name).cloned() {
-                    // let instance_id = self.ty_instantiate(info.ty_id, &mut HashMap::new());
-
-                    // let Type::UserDef { fields, .. } = self.get_type(instance_id).clone() else {
-                    //     unreachable!()
-                    // };
-
                     if info.fields.len() != args.len() {
                         return Err(tyerr(TypeErrorKind::WrongStructLiteralCount, span));
                     }
@@ -703,8 +658,6 @@ impl Typechecker {
 
                         match self.get_type(*field_ty) {
                             Type::Generic(_) => {
-                                // let id = self.add_unknown_ty();
-                                // self.check(ast, *value, id)?
                                 let value_ty = self.infer(ast, *value)?;
                                 generics.push(value_ty);
                             }
@@ -712,12 +665,10 @@ impl Typechecker {
                         };
                     }
 
-                    let ty_id = self.add_type(Type::UserDef {
+                    self.add_type(Type::UserDef {
                         args: generics.into(),
                         name: *name,
-                    });
-
-                    ty_id
+                    })
                 } else {
                     Err(tyerr(TypeErrorKind::UndeclaredType, span))?
                 }
@@ -910,17 +861,6 @@ impl Typechecker {
             }
 
             Type::UserDef { name, args } => {
-                // let info = self
-                //     .structs
-                //     .get(&name)
-                //     .expect("cannot instantiate undeclared struct");
-                //
-                //                 let instantiated = info
-                //                     .fields
-                //                     .iter()
-                //                     .map(|f| (f.0, self.ty_instantiate(f.1, generics)))
-                //                     .collect();
-
                 let instanciated = args
                     .iter()
                     .map(|a| self.ty_instantiate(*a, generics))

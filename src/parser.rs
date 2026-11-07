@@ -33,8 +33,8 @@ pub enum Expr {
     BoolLiteral(bool),
     // ArrayLiteral(List<ExprId>),
     StructLiteral(IdentId, List<(IdentId, ExprId)>),
+
     Variable(IdentId),
-    Grouping(ExprId),
 
     // Assign {
     //     lhs: ExprId,
@@ -42,6 +42,7 @@ pub enum Expr {
     // },
     Return(ExprId),
 
+    Grouping(ExprId),
     Unary {
         op: TokenKind,
         rhs: ExprId,
@@ -86,6 +87,7 @@ pub enum Expr {
 #[derive(Debug)]
 pub enum TyAnnot {
     // Void,
+    Hole,
     Type {
         name: IdentId,
         args: List<TyAnnotId>,
@@ -170,8 +172,32 @@ pub enum ParseErrorKind {
 fn err_span(err: ParseErrorKind, span: Span) -> ParseError {
     (err, span)
 }
-fn err_tok(err: ParseErrorKind, tok: &Token) -> ParseError {
-    err_span(err, tok.span)
+fn err_tok(err: ParseErrorKind, tok: Token) -> ParseError {
+    err_span(err, tok.to_span())
+}
+
+pub fn render_parse_err(lex: &Lexer, e: &ParseError) -> String {
+    // TODO: line offsets might be retarded, just get the current line until the newline?
+
+    let pos_start = lex.pos_from_offset(e.1.start);
+    let pos_end = lex.pos_from_offset(e.1.end);
+
+    let curr_line = lex.str_line_from_pos(&pos_start).trim();
+    let filename = "test.cmb"; // TODO: add filename here
+
+    let mut str = format!("error: {:?} ", e.0);
+    str += &format!("at {filename}:{}:{}\n", pos_start.line, pos_start.col);
+    str += &format!("\t{curr_line}\n");
+
+    let left = " ".repeat(pos_start.col.saturating_sub(1) as usize);
+    let underline = "^".repeat(e.1.len() as usize);
+    str += &format!("\t{left}{underline}");
+
+    if pos_start.line != pos_end.line {
+    } else {
+    }
+
+    str
 }
 
 type ParseError = Spanned<ParseErrorKind>;
@@ -189,37 +215,30 @@ pub struct Parser {
 }
 
 impl Parser {
-    fn add_ident(&mut self, c: &ParseCursor, tok: &Token) -> IdentId {
-        IdentId(self.idents.add(c.lex.str_from_tok(tok)))
+    fn add_ident(&mut self, c: &ParseCursor, start: Token) -> IdentId {
+        IdentId(self.idents.add(c.lex.str_from_tok(start)))
     }
 
-    fn add_ty_annot(&mut self, ty: TyAnnot, c: &ParseCursor, start: &Token) -> TyAnnotId {
+    fn add_ty_annot(&mut self, ty: TyAnnot, c: &ParseCursor, start: Token) -> TyAnnotId {
         let id = self.types.len();
         self.types.push((ty, c.span(start)));
         TyAnnotId(id as Id)
     }
 
-    fn add_stmt(&mut self, stmt: Stmt, c: &ParseCursor, start: &Token) -> StmtId {
+    fn add_stmt(&mut self, stmt: Stmt, c: &ParseCursor, start: Token) -> StmtId {
         let id = self.stmts.len();
         self.stmts.push((stmt, c.span(start)));
         StmtId(id as Id)
     }
 
-    fn add_expr(&mut self, expr: Expr, c: &ParseCursor, start: &Token) -> ExprId {
+    fn add_expr(&mut self, expr: Expr, c: &ParseCursor, start: Token) -> ExprId {
         let id = self.exprs.len();
         self.exprs.push((expr, c.span(start)));
         ExprId(id as Id)
     }
 
     // TODO: do recover inside here
-    fn report_error(&mut self, c: &mut ParseCursor, e: ParseError) {
-        eprintln!(
-            "{:?} {:?} {:?} {:?}",
-            c.lex.str_from_span(&e.1),
-            e.0,
-            c.lex.pos_from_offset(e.1.start),
-            c.lex.pos_from_offset(e.1.end)
-        );
+    fn report_error(&mut self, _c: &mut ParseCursor, e: ParseError) {
         self.errors.push(e);
     }
 
@@ -229,8 +248,8 @@ impl Parser {
         anchors: &[TokenKind],
         after: &str,
     ) -> ParseResult<IdentId> {
-        let ident_tok = c.expect(TokenKind::Ident, anchors, || after)?.clone();
-        Ok(self.add_ident(c, &ident_tok))
+        let ident_tok = c.expect(TokenKind::Ident, anchors, || after)?;
+        Ok(self.add_ident(c, ident_tok))
     }
 
     // https://matklad.github.io/2020/04/13/simple-but-powerful-pratt-parsing.html
@@ -271,7 +290,7 @@ impl Parser {
             Some(lvl)
         }
 
-        let tok = &c.advance().clone();
+        let tok = c.advance();
 
         let mut lhs = match tok.kind {
             TokenKind::IntNumber => {
@@ -377,7 +396,6 @@ impl Parser {
                 if postfix_lvl < prec_lvl {
                     break;
                 }
-                let op = op.clone();
                 c.advance();
 
                 lhs = match op.kind {
@@ -415,7 +433,6 @@ impl Parser {
                 if left_lvl < prec_lvl {
                     break;
                 }
-                let op = op.clone();
                 c.advance();
 
                 if c.eat(TokenKind::Question).is_some() {
@@ -466,7 +483,7 @@ impl Parser {
     }
 
     fn parse_ty_annot(&mut self, c: &mut ParseCursor) -> ParseResult<TyAnnotId> {
-        let tok = &c.advance().clone();
+        let tok = c.advance();
 
         let ty = match tok.kind {
             TokenKind::Ident => {
@@ -558,7 +575,7 @@ impl Parser {
         F: FnMut(&mut Self, &mut ParseCursor) -> ParseResult<T>,
     {
         let mut list = Vec::new();
-        let start = c.peek().clone();
+        let start = c.peek();
 
         while c.has_some() {
             if c.eat(terminator).is_some() {
@@ -578,7 +595,7 @@ impl Parser {
                 // if we don't get a terminator, it is an error
 
                 if c.eat(terminator).is_none() {
-                    let span = c.span(&start);
+                    let span = c.span(start);
                     return Err(err_span(ParseErrorKind::UnclosedListing(what), span));
                 }
 
@@ -591,7 +608,7 @@ impl Parser {
 
     fn parse_block(&mut self, c: &mut ParseCursor) -> ParseResult<Block> {
         let start = StmtId(self.stmts.len() as Id);
-        let start_tok = c.prev().clone();
+        let start_tok = c.prev();
 
         let mut is_closed = false;
         while c.has_some() {
@@ -610,14 +627,14 @@ impl Parser {
         }
 
         if !is_closed {
-            return Err(err_tok(ParseErrorKind::UnclosedBlock, &start_tok));
+            return Err(err_tok(ParseErrorKind::UnclosedBlock, start_tok));
         }
 
         let end = StmtId(self.stmts.len() as Id);
         Ok(Block { start, end })
     }
 
-    fn parse_var_decl(&mut self, c: &mut ParseCursor, start: &Token) -> ParseResult<StmtId> {
+    fn parse_var_decl(&mut self, c: &mut ParseCursor, start: Token) -> ParseResult<StmtId> {
         let name = self.parse_ident(c, &[TokenKind::Semicolon, TokenKind::Equal], "let token")?;
 
         let ty = if c.eat(TokenKind::Colon).is_some() {
@@ -645,7 +662,7 @@ impl Parser {
     }
 
     fn parse_inner_stmt(&mut self, c: &mut ParseCursor) -> ParseResult<StmtId> {
-        let tok = &c.advance().clone();
+        let tok = c.advance();
 
         let id = match tok.kind {
             TokenKind::Let => self.parse_var_decl(c, tok)?,
@@ -680,19 +697,18 @@ impl Parser {
     }
 
     fn parse_top_stmt(&mut self, c: &mut ParseCursor) -> ParseResult<StmtId> {
-        let tok = &c.advance().clone();
+        let tok = c.advance();
 
         let id = match tok.kind {
             TokenKind::Let => self.parse_var_decl(c, tok)?,
             TokenKind::Fn => {
-                let name_tok = c
-                    .expect(
-                        TokenKind::Ident,
-                        &[TokenKind::ParenL, TokenKind::ParenR, TokenKind::BraceL],
-                        || "fn token",
-                    )?
-                    .clone();
-                let name = self.add_ident(c, &name_tok);
+                let name_tok = c.expect(
+                    TokenKind::Ident,
+                    &[TokenKind::ParenL, TokenKind::ParenR, TokenKind::BraceL],
+                    || "fn token",
+                )?;
+
+                let name = self.add_ident(c, name_tok);
 
                 let generics = if c.eat(TokenKind::Less).is_some() {
                     self.parse_listing(
@@ -848,21 +864,21 @@ impl<'a> ParseCursor<'a> {
         Self { lex, pos: 0 }
     }
 
-    fn peek(&self) -> &Token {
+    fn peek(&self) -> Token {
         // we always at least have the last EOF token, so this cant fail
         // be careful in eating loops
-        &self.lex.tokens[self.pos as usize]
+        self.lex.tokens[self.pos as usize]
     }
 
-    fn prev(&self) -> &Token {
-        &self.lex.tokens[self.pos.saturating_sub(1) as usize]
+    fn prev(&self) -> Token {
+        self.lex.tokens[self.pos.saturating_sub(1) as usize]
     }
 
     fn check(&self, target: TokenKind) -> bool {
         self.peek().kind == target
     }
 
-    fn advance(&mut self) -> &Token {
+    fn advance(&mut self) -> Token {
         self.pos += 1;
         self.prev()
     }
@@ -871,7 +887,7 @@ impl<'a> ParseCursor<'a> {
         self.pos -= 1;
     }
 
-    fn eat(&mut self, target: TokenKind) -> Option<&Token> {
+    fn eat(&mut self, target: TokenKind) -> Option<Token> {
         if self.check(target) {
             Some(self.advance())
         } else {
@@ -879,8 +895,8 @@ impl<'a> ParseCursor<'a> {
         }
     }
 
-    fn span(&self, start_tok: &Token) -> Span {
-        start_tok.span.merge(&self.prev().span)
+    fn span(&self, start_tok: Token) -> Span {
+        start_tok.to_span().merge(&self.prev().to_span())
     }
 
     fn expect<S: Into<String>, M: FnOnce() -> S>(
@@ -888,11 +904,11 @@ impl<'a> ParseCursor<'a> {
         target: TokenKind,
         anchors: &[TokenKind],
         msg: M,
-    ) -> ParseResult<&Token> {
+    ) -> ParseResult<Token> {
         if self.check(target) {
             Ok(self.advance())
         } else {
-            let tok = self.peek().clone();
+            let tok = self.peek();
 
             let mut anchors = anchors.to_vec();
             anchors.push(target);
@@ -906,24 +922,24 @@ impl<'a> ParseCursor<'a> {
                     actual: tok.kind,
                     at: msg().into(),
                 },
-                self.span(&tok),
+                self.span(tok),
             );
             Err(err)
         }
     }
 
-    fn expect_semicolon(&mut self, msg: &str) -> ParseResult<&Token> {
+    fn expect_semicolon(&mut self, msg: &str) -> ParseResult<Token> {
         if self.check(TokenKind::Semicolon) {
             Ok(self.advance())
         } else {
-            let tok = self.peek().clone();
+            let tok = self.peek();
             let err = err_tok(
                 ParseErrorKind::WrongToken {
                     expected: TokenKind::Semicolon,
                     actual: tok.kind,
                     at: format!("end of {msg} statement"),
                 },
-                &tok,
+                tok,
             );
             Err(err)
         }
@@ -962,7 +978,10 @@ pub fn parse(lex: &Lexer) -> Parser {
     while c.has_some() {
         match p.parse_top_stmt(&mut c) {
             Ok(id) => p.global_stmts.push(id),
-            Err(e) => p.report_error(&mut c, e),
+            Err(e) => {
+                p.report_error(&mut c, e);
+                c.recover(&[TokenKind::Semicolon, TokenKind::BraceR]);
+            }
         }
     }
 

@@ -36,6 +36,7 @@ pub enum TokenKind {
     Perc = b'%',
     Less = b'<',
     Great = b'>',
+    Under = b'_',
 
     Invalid = 128,
     Eof,
@@ -73,6 +74,8 @@ pub enum TokenKind {
     Break,
     Continue,
     Return,
+
+    Module,
 
     True,
     False,
@@ -165,6 +168,7 @@ pub const KEYWORDS: &[(&'static str, TokenKind)] = &[
     ("and", TokenKind::And),
     ("or", TokenKind::Or),
     ("not", TokenKind::Not),
+    ("module", TokenKind::Module),
 ];
 
 // TODO: convert this to hashset
@@ -178,20 +182,35 @@ pub const KEYWORDS_HASHES: [u64; KEYWORDS.len()] = {
     hashes
 };
 
-#[derive(Debug, Clone)]
+// 64bits Token. Chef kiss
+#[derive(Debug, Clone, Copy)]
 pub struct Token {
     pub kind: TokenKind,
-    pub span: Span,
+    pub len: u16,
+    pub start: u32,
 }
-impl fmt::Display for Token {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "'{}' - {}:{}", self.kind, self.span.start, self.span.end)
+impl Token {
+    pub fn new(kind: TokenKind, start: u32, end: u32) -> Self {
+        let len = end - start;
+        Self {
+            kind,
+            start,
+            len: len as u16,
+        }
+    }
+
+    pub fn to_span(&self) -> Span {
+        Span {
+            start: self.start,
+            end: self.start + self.len as u32,
+        }
     }
 }
 
 #[derive(Debug)]
 pub enum LexError {
     InputTooBig,
+    TokenTooBig(Span),
     UnclosedBlockComment(Position),
 }
 
@@ -213,20 +232,23 @@ impl Lexer {
 }
 
 impl Lexer {
-    pub fn token_pos(&self, tok: &Token) -> Positioned<TokenKind> {
+    pub fn token_pos(&self, tok: Token) -> Positioned<TokenKind> {
         (tok.kind, self.pos_from_tok(tok))
     }
 
-    pub fn str_from_tok(&self, tok: &Token) -> &str {
-        self.str_from_span(&tok.span)
+    pub fn str_from_tok(&self, tok: Token) -> &str {
+        self.str_from_span(Span {
+            start: tok.start,
+            end: tok.start + tok.len as u32,
+        })
     }
 
-    pub fn str_from_span(&self, span: &Span) -> &str {
+    pub fn str_from_span(&self, span: Span) -> &str {
         &self.input[span.start as usize..span.end as usize]
     }
 
-    pub fn pos_from_tok(&self, tok: &Token) -> Position {
-        self.pos_from_offset(tok.span.start)
+    pub fn pos_from_tok(&self, tok: Token) -> Position {
+        self.pos_from_offset(tok.start)
     }
 
     pub fn pos_from_offset(&self, offset: u32) -> Position {
@@ -275,6 +297,7 @@ impl<'a> LexCursor<'a> {
         self.peek().filter(|c| *c == target).is_some()
     }
 
+    // return last character and its start offset
     fn advance(&mut self) -> Option<(char, u32)> {
         if let Some(c) = self.peek() {
             let pos = self.pos as u32;
@@ -362,6 +385,7 @@ pub fn scan(input: String) -> Result<Lexer, LexError> {
                 '.' => cursor.eat_double_or_single('=', TokenKind::DotDot, TokenKind::Dot),
                 ':' => TokenKind::Colon,
                 ';' => TokenKind::Semicolon,
+                '_' => TokenKind::Under,
                 '?' => TokenKind::Question,
                 '=' => cursor.eat_double_or_single('=', TokenKind::EqualEq, TokenKind::Equal),
                 '!' => cursor.eat_double_or_single('=', TokenKind::NotEq, TokenKind::Bang),
@@ -413,24 +437,14 @@ pub fn scan(input: String) -> Result<Lexer, LexError> {
             }
         };
 
-        lex.tokens.push(Token {
-            kind,
-            span: Span {
-                start,
-                end: cursor.pos,
-            },
-        });
+        // TODO: len might be bigger than u16? what should happen in that case?
+        lex.tokens.push(Token::new(kind, start, cursor.pos));
     }
 
     // BE CAREFUL: EOF character isn't really there, meaning you can't slice it from the input string.
     // By having len = 0 (start = end), the slice will be empty so no out of bounds accesses can occur
-    lex.tokens.push(Token {
-        kind: TokenKind::Eof,
-        span: Span {
-            start: cursor.pos,
-            end: cursor.pos,
-        },
-    });
+    lex.tokens
+        .push(Token::new(TokenKind::Eof, cursor.pos, cursor.pos));
 
     Ok(lex)
 }
