@@ -540,7 +540,9 @@ impl Typechecker {
     fn infer_block(&mut self, ast: &Ast, block: &Block) -> TypeResult<TypeId> {
         let mut ret_ty = None;
 
-        for stmt_id in block.list.iter().copied() {
+        // iter over all except the last
+        // this is important because otherwise we would add two different type variables for the last expression and incurr in a type error
+        for stmt_id in block.list.iter().rev().skip(1).rev().copied() {
             // let stmt_id = StmtId(stmt_iter);
             let (stmt, span) = ast.get_stmt(stmt_id);
             match stmt {
@@ -561,13 +563,6 @@ impl Typechecker {
                             }
                         },
 
-                        // TODO: we're visiting inner blocks more than once doing useless work
-                        // TODO: this loops program
-                        // Expr::Block(inner_block) => {
-                        //     self.infer_block(ast, inner_block)?;
-                        //     // WE continue visiting nodes from the last of this child block, or else we'll visit them more than once
-                        //     stmt_iter = inner_block.end.0;
-                        // }
                         _ => _ = self.infer(ast, *expr_id)?,
                     }
                 }

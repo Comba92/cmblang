@@ -627,6 +627,17 @@ impl Parser {
                     // c.recover(INNER_ANCHORS);
                 }
             }
+
+            if c.eat(TokenKind::Semicolon).is_none() {
+                // only last statements can miss the semicolon
+                c.expect(
+                    TokenKind::BraceR,
+                    &[],
+                    || "only last statement in block can miss the semicolon",
+                )?;
+                is_closed = true;
+                break;
+            }
         }
 
         if !is_closed {
@@ -664,7 +675,6 @@ impl Parser {
         )?;
 
         let expr = self.parse_expr(c, 0)?;
-        c.expect_semicolon("var declaration")?;
 
         let stmt = Stmt::VarDecl(VarContent {
             name,
@@ -683,7 +693,6 @@ impl Parser {
 
             TokenKind::Return => {
                 let expr = self.parse_expr(c, 0)?;
-                c.expect_semicolon("return")?;
                 let ret = self.add_expr(Expr::Return(expr), c, tok);
                 self.add_stmt(Stmt::Expr(ret), c, tok)
             }
@@ -805,12 +814,6 @@ impl Parser {
                 // try to parse expression
                 c.undo();
                 let expr = self.parse_expr(c, 0)?;
-
-                // we like blocks without ending semicolon!
-                if c.prev().kind != TokenKind::BraceR {
-                    c.expect_semicolon("expression")?;
-                }
-
                 self.add_stmt(Stmt::Expr(expr), c, tok)
             }
         };
@@ -888,7 +891,7 @@ impl<'a> ParseCursor<'a> {
         }
     }
 
-    fn expect_semicolon(&mut self, msg: &str) -> ParseResult<Token> {
+    fn expect_semicolon(&mut self) -> ParseResult<Token> {
         if self.check(TokenKind::Semicolon) {
             Ok(self.advance())
         } else {
@@ -897,7 +900,7 @@ impl<'a> ParseCursor<'a> {
                 ParseErrorKind::WrongToken {
                     expected: TokenKind::Semicolon,
                     actual: tok.kind,
-                    at: format!("end of {msg} statement"),
+                    at: "end of statement".into(),
                 },
                 tok,
             );
@@ -937,7 +940,18 @@ pub fn parse(lex: &Lexer) -> Parser {
     let mut c = ParseCursor::new(lex);
 
     while c.has_some() {
-        match p.parse_stmt(&mut c) {
+        match p.parse_stmt(&mut c).and_then(|stmt_id| {
+            // if we have an closing brace, ignore the trailing semicolon;
+            // otherwise, expect it
+            // TODO: wouldnt it be a lot better if we allowed empty statements...?
+
+            if c.prev().kind != TokenKind::BraceR {
+                c.expect_semicolon()?;
+            } else {
+                c.eat(TokenKind::Semicolon);
+            }
+            Ok(stmt_id)
+        }) {
             Ok(id) => p.global_stmts.push(id),
             Err(e) => {
                 p.add_err(&mut c, e);
