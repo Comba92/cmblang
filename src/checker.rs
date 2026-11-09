@@ -377,9 +377,36 @@ impl Typechecker {
         Ok(())
     }
 
-    fn global_pass(&mut self, ast: &Ast, stmt_id: StmtId) -> TypeResult<()> {
+    fn first_pass(&mut self, ast: &Ast, stmt_id: StmtId) -> TypeResult<()> {
+        // this pass only collects the structs names and arguments
+        // a struct can reference another struct which might be not yet declared
+
+        let (stmt, span) = ast.get_stmt(stmt_id);
+        match stmt {
+            Stmt::StructDecl(content) => {
+                if has_duplicates(&content.generics, |g| *g) {
+                    return Err(tyerr(TypeErrorKind::DuplicateGenericsInStruct, span));
+                }
+
+                // TODO: what if we have colliding names?
+                self.structs.insert(
+                    content.name,
+                    StructInfo {
+                        generics: content.generics.clone(),
+                        name: content.name,
+                        fields: Default::default(),
+                    },
+                );
+            }
+
+            _ => {} // do nothing
+        }
+
+        Ok(())
+    }
+
+    fn second_pass(&mut self, ast: &Ast, stmt_id: StmtId) -> TypeResult<()> {
         // TODO: structs should need two passes.
-        // a struct can reference another struct which might not yet declared
         // so the first pass takse the structs name and pushes to the types scopes,
         // the seconds collects the struct fields
 
@@ -429,20 +456,23 @@ impl Typechecker {
             }
 
             Stmt::StructDecl(content) => {
-                if has_duplicates(&content.generics, |g| *g) {
-                    return Err(tyerr(TypeErrorKind::DuplicateGenericsInStruct, span));
-                }
-
                 if has_duplicates(&content.fields, |f| f.0) {
                     return Err(tyerr(TypeErrorKind::DuplicateFieldsInStruct, span));
                 }
 
-                // TODO: check for self inside fields types
+                // TODO: check for self referencing type
 
                 let mut fields = Vec::new();
                 for field in &content.fields {
                     fields.push((field.0, self.add_type_from_annotation(ast, field.1)?));
                 }
+
+                let info = self
+                    .structs
+                    .get_mut(&content.name)
+                    .ok_or_else(|| tyerr(TypeErrorKind::UndeclaredType, span))?;
+
+                info.fields = fields.into();
 
                 // let mut generics = Vec::new();
                 // for generic in &content.generics {
@@ -458,15 +488,15 @@ impl Typechecker {
                 //
                 //                 let ty_id = self.add_type(ty);
 
-                self.structs.insert(
-                    content.name,
-                    StructInfo {
-                        // ty_id,
-                        generics: content.generics.clone(),
-                        name: content.name,
-                        fields: fields.into(),
-                    },
-                );
+                // self.structs.insert(
+                //     content.name,
+                //     StructInfo {
+                //         // ty_id,
+                //         generics: content.generics.clone(),
+                //         name: content.name,
+                //         fields: fields.into(),
+                //     },
+                // );
             }
             _ => {}
         }
@@ -856,7 +886,28 @@ impl Typechecker {
                 self.unify(ret_l, ret_r, span)?;
             }
 
-            (Type::UserDef { args: args_l, .. }, Type::UserDef { args: args_r, .. }) => {
+            (
+                Type::UserDef {
+                    name: name_l,
+                    args: args_l,
+                    ..
+                },
+                Type::UserDef {
+                    name: name_r,
+                    args: args_r,
+                    ..
+                },
+            ) => {
+                if name_l != name_r {
+                    return Err(tyerr(
+                        TypeErrorKind::TypeMismatch {
+                            a: self.get_type(ty_id_a).clone(),
+                            b: self.get_type(ty_id_b).clone(),
+                        },
+                        span,
+                    ));
+                }
+
                 for (arg_l, arg_r) in args_l.iter().zip(args_r.iter()) {
                     self.unify(*arg_l, *arg_r, span)?;
                 }
@@ -958,16 +1009,23 @@ impl Typechecker {
 pub fn typecheck(ast: &mut Ast) -> Typechecker {
     let mut tc = Typechecker::default();
 
-    // first pass: gather top level symbols (struct definitions and function signatures)
+    // first pass: gather userdefs names and arguments only
     for stmt in &ast.global_stmts {
-        match tc.global_pass(ast, *stmt) {
+        match tc.first_pass(ast, *stmt) {
             Ok(_) => {}
             Err(e) => tc.report_error(ast, e),
         }
     }
 
-    // second pass, global variables and scan funtion bodies
-    // typecheck expression blocks
+    // second pass: gather top level symbols (struct fields and function signatures)
+    for stmt in &ast.global_stmts {
+        match tc.second_pass(ast, *stmt) {
+            Ok(_) => {}
+            Err(e) => tc.report_error(ast, e),
+        }
+    }
+
+    // third pass, global variables and scan funtion bodies
     for stmt in &ast.global_stmts {
         match tc.typecheck(ast, *stmt) {
             Ok(_) => {}

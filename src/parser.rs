@@ -302,7 +302,6 @@ impl Parser {
             TokenKind::If => {
                 let cond = self.parse_expr(c, 0)?;
                 let first = self.parse_expr_block(c, start, || "if expr")?;
-                dbg!(c.peek());
 
                 let second = if c.eat(TokenKind::Else).is_some() {
                     Some(self.parse_expr_block(c, start, || "else expr")?)
