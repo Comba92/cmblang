@@ -12,7 +12,7 @@ fn main() {
 
     let parser = parse(&lex);
     for err in &parser.errors {
-        out += &render_err(&lex, &err.0, err.1);
+        out += &render_err(&lex, &err.0, err.1, ErrSource::Parser);
         out += "\n";
     }
 
@@ -20,7 +20,7 @@ fn main() {
     let checker = typecheck(&mut ast);
 
     for err in &checker.errors {
-        out += &render_err(&ast.lex, &err.0, err.1);
+        out += &render_err(&ast.lex, &err.0, err.1, ErrSource::Checker);
         out += "\n";
     }
 

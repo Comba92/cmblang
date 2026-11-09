@@ -52,6 +52,13 @@ impl Environment {
         self.scopes.push(HashMap::new())
     }
 
+    fn push_scope_with<F: FnOnce() -> TypeResult<()>>(&mut self, callback: F) -> TypeResult<()> {
+        self.push_scope();
+        let res = callback();
+        self.pop_scope();
+        res
+    }
+
     fn pop_scope(&mut self) {
         self.scopes.pop();
     }
@@ -128,6 +135,7 @@ pub enum TypeErrorKind {
     ValueNotAssignable,
     UndeclaredType,
     ArgumentsInGenericParameter,
+    BlockWithoutReturnExpr,
 }
 
 type TypeError = Spanned<TypeErrorKind>;
@@ -573,6 +581,27 @@ impl Typechecker {
             // stmt_iter += 1;
         }
 
+        // check last expression
+        // if block has no elements, its just void
+        if let Some(last) = block.list.last() {
+            let (stmt, span) = ast.get_stmt(*last);
+
+            match stmt {
+                Stmt::Expr(expr) => match ret_ty {
+                    None => {
+                        // we found the first return epxr.
+                        ret_ty = Some(self.infer(ast, *expr)?);
+                    }
+                    Some(found_ret_ty) => {
+                        // we found another return expr. all other return statement should have the same type as the first.
+                        self.check(ast, *expr, found_ret_ty)?;
+                    }
+                },
+
+                _ => return Err(tyerr(TypeErrorKind::BlockWithoutReturnExpr, span)),
+            }
+        }
+
         // if we didn't find any return types, this block has type void
         Ok(ret_ty.unwrap_or(VOID_ID))
     }
@@ -624,6 +653,26 @@ impl Typechecker {
                 let ty = self.infer(ast, *first)?;
                 self.check(ast, *second, ty)?;
                 ty
+            }
+
+            Expr::IfElse {
+                cond,
+                first,
+                second,
+            } => {
+                self.check(ast, *cond, BOOL_ID)?;
+                let first_ty = self.infer(ast, *first)?;
+                if let Some(second) = second {
+                    self.check(ast, *second, first_ty)?;
+                }
+
+                first_ty
+            }
+
+            Expr::While { cond, code } => {
+                self.check(ast, *cond, BOOL_ID)?;
+                self.infer(ast, *code)?;
+                VOID_ID
             }
 
             Expr::Call { callee, args } => {

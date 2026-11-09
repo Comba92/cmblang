@@ -52,7 +52,12 @@ pub struct Position {
     pub col_end: u32,
 }
 
-pub fn render_err<E: std::fmt::Debug>(lex: &Lexer, e: &E, span: Span) -> String {
+#[derive(Debug)]
+pub enum ErrSource {
+    Parser,
+    Checker,
+}
+pub fn render_err<E: std::fmt::Debug>(lex: &Lexer, e: &E, span: Span, src: ErrSource) -> String {
     // TODO: line offsets might be retarded, just get the current line until the newline?
 
     //     let line_start = lex
@@ -80,7 +85,7 @@ pub fn render_err<E: std::fmt::Debug>(lex: &Lexer, e: &E, span: Span) -> String 
     let curr_line = lex.str_line_from_pos(&pos);
     let filename = "test.cmb"; // TODO: add filename here
 
-    let mut str = format!("error: {:?} ", e);
+    let mut str = format!("error ({:?}): {:?} ", src, e);
     str += &format!("at {filename}:{}:{}\n", pos.line_start, pos.col_start);
     str += &format!("\t{curr_line}\n");
 

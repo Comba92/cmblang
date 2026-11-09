@@ -55,6 +55,16 @@ pub enum Expr {
         second: ExprId,
     },
 
+    IfElse {
+        cond: ExprId,
+        first: ExprId,
+        second: Option<ExprId>,
+    },
+    While {
+        cond: ExprId,
+        code: ExprId,
+    },
+
     Call {
         callee: ExprId,
         args: List<ExprId>,
@@ -94,7 +104,7 @@ pub enum TyAnnot {
 pub struct VarContent {
     pub name: IdentId,
     pub ty: Option<TyAnnotId>,
-    pub rhs: ExprId,
+    pub rhs: ExprId, // TODO: do we want optional definition?
 }
 
 #[derive(Debug, Clone)]
@@ -161,7 +171,18 @@ fn err_tok(err: ParseErrorKind, tok: Token) -> ParseError {
 }
 
 // TODO: update these as new statements and expressions are added
-const INNER_ANCHORS: &[TokenKind] = &[TokenKind::Let, TokenKind::Return, TokenKind::Equal];
+// TODO: these are getting big. maybe better to turn em into sets?
+const INNER_ANCHORS: &[TokenKind] = &[
+    TokenKind::Let,
+    TokenKind::Return,
+    TokenKind::If,
+    TokenKind::While,
+    TokenKind::For,
+    TokenKind::Equal,
+    // we add these closing tokens and recovers automatically will skip em
+    TokenKind::Semicolon,
+    TokenKind::BraceR,
+];
 const FNDECL_ANCHORS: &[TokenKind] = &[TokenKind::BraceL, TokenKind::Struct, TokenKind::Let];
 const TOPLVL_ANCHORS: &[TokenKind] = &[TokenKind::Fn, TokenKind::Struct, TokenKind::Let];
 
@@ -254,32 +275,61 @@ impl Parser {
             Some(lvl)
         }
 
-        let tok = c.advance();
+        let start = c.advance();
 
-        let mut lhs = match tok.kind {
+        let mut lhs = match start.kind {
             TokenKind::IntNumber => {
                 let num = c
                     .lex
-                    .str_from_tok(tok)
+                    .str_from_tok(start)
                     .parse()
-                    .map_err(|e| err_tok(ParseErrorKind::IntParseError(e), tok))?;
-                self.add_expr(Expr::IntLiteral(num), c, tok)
+                    .map_err(|e| err_tok(ParseErrorKind::IntParseError(e), start))?;
+                self.add_expr(Expr::IntLiteral(num), c, start)
             }
 
             TokenKind::FloatNumber => {
                 let num = c
                     .lex
-                    .str_from_tok(tok)
+                    .str_from_tok(start)
                     .parse()
-                    .map_err(|e| err_tok(ParseErrorKind::FloatParseError(e), tok))?;
-                self.add_expr(Expr::FloatLiteral(num), c, tok)
+                    .map_err(|e| err_tok(ParseErrorKind::FloatParseError(e), start))?;
+                self.add_expr(Expr::FloatLiteral(num), c, start)
             }
 
-            TokenKind::True => self.add_expr(Expr::BoolLiteral(true), c, tok),
-            TokenKind::False => self.add_expr(Expr::BoolLiteral(false), c, tok),
+            TokenKind::True => self.add_expr(Expr::BoolLiteral(true), c, start),
+            TokenKind::False => self.add_expr(Expr::BoolLiteral(false), c, start),
+
+            TokenKind::If => {
+                let cond = self.parse_expr(c, 0)?;
+                let first = self.parse_expr_block(c, start, || "if expr")?;
+                dbg!(c.peek());
+
+                let second = if c.eat(TokenKind::Else).is_some() {
+                    Some(self.parse_expr_block(c, start, || "else expr")?)
+                } else {
+                    None
+                };
+
+                self.add_expr(
+                    Expr::IfElse {
+                        cond,
+                        first,
+                        second,
+                    },
+                    c,
+                    start,
+                )
+            }
+
+            TokenKind::While => {
+                let cond = self.parse_expr(c, 0)?;
+                let code = self.parse_expr_block(c, start, || "while block")?;
+
+                self.add_expr(Expr::While { cond, code }, c, start)
+            }
 
             TokenKind::Ident => {
-                let ident = self.add_ident(c, tok);
+                let ident = self.add_ident(c, start);
 
                 if c.eat(TokenKind::BraceL).is_some() {
                     // struct literal
@@ -299,18 +349,18 @@ impl Parser {
                     // we sort the fields because they might come in any order
                     // fields.sort_by_key(|f| f.0);
 
-                    self.add_expr(Expr::StructLiteral(ident, fields), c, tok)
+                    self.add_expr(Expr::StructLiteral(ident, fields), c, start)
                 } else {
-                    self.add_expr(Expr::Variable(ident), c, tok)
+                    self.add_expr(Expr::Variable(ident), c, start)
                 }
             }
 
             // prefix op
             TokenKind::Minus | TokenKind::Bang => {
-                let lvl = prefix_lvl(tok.kind);
-                let op = tok.kind;
+                let lvl = prefix_lvl(start.kind);
+                let op = start.kind;
                 let rhs = self.parse_expr(c, lvl)?;
-                self.add_expr(Expr::Unary { op, rhs }, c, tok)
+                self.add_expr(Expr::Unary { op, rhs }, c, start)
             }
 
             TokenKind::ParenL => {
@@ -320,12 +370,12 @@ impl Parser {
                     INNER_ANCHORS,
                     || "expression parenthesis grouping",
                 )?;
-                self.add_expr(Expr::Grouping(lhs), c, tok)
+                self.add_expr(Expr::Grouping(lhs), c, start)
             }
 
             TokenKind::BraceL => {
                 let block = self.parse_block(c)?;
-                self.add_expr(Expr::Block(block), c, tok)
+                self.add_expr(Expr::Block(block), c, start)
             }
 
             //       // array literal
@@ -338,10 +388,10 @@ impl Parser {
             //
             //         self.push_expr(Expr::Literal(ExprLiteral::Array(exprs)), t.span)
             //       }
-            TokenKind::Invalid => return Err(err_tok(ParseErrorKind::InvalidCharacter, tok)),
+            TokenKind::Invalid => return Err(err_tok(ParseErrorKind::InvalidCharacter, start)),
             _ => {
                 // TODO: handle malformed expression better?
-                return Err(err_tok(ParseErrorKind::MalformedExpression, tok));
+                return Err(err_tok(ParseErrorKind::MalformedExpression, start));
             }
         };
 
@@ -366,17 +416,17 @@ impl Parser {
                             |p, c| p.parse_expr(c, 0),
                             ListingKind::FuncCallArgs,
                         )?;
-                        self.add_expr(Expr::Call { callee: lhs, args }, c, tok)
+                        self.add_expr(Expr::Call { callee: lhs, args }, c, start)
                     }
 
                     TokenKind::SquareL => {
                         let idx = self.parse_expr(c, 0)?;
-                        self.add_expr(Expr::Indexing { src: lhs, idx }, c, tok)
+                        self.add_expr(Expr::Indexing { src: lhs, idx }, c, start)
                     }
 
                     TokenKind::Dot => {
                         let member = self.parse_ident(c, INNER_ANCHORS, "struct member access")?;
-                        self.add_expr(Expr::Member { src: lhs, member }, c, tok)
+                        self.add_expr(Expr::Member { src: lhs, member }, c, start)
                     }
                     _ => unreachable!(), // this shouldnt happen! precondition: postfix_lvl returns only these variants
                 };
@@ -406,7 +456,7 @@ impl Parser {
                             second,
                         },
                         c,
-                        tok,
+                        start,
                     );
                 // } else if c.eat(TokenKind::Equal).is_some() {
                 //     // TODO: not sure about this. this permits to chain multiple assignments
@@ -424,7 +474,7 @@ impl Parser {
                             rhs,
                         },
                         c,
-                        tok,
+                        start,
                     );
                 }
 
@@ -585,6 +635,17 @@ impl Parser {
 
         // let end = StmtId(self.stmts.len() as Id);
         Ok(Block { list: list.into() })
+    }
+
+    fn parse_expr_block<S: Into<String>, M: FnOnce() -> S>(
+        &mut self,
+        c: &mut ParseCursor,
+        start: Token,
+        msg: M,
+    ) -> ParseResult<ExprId> {
+        c.expect(TokenKind::BraceL, INNER_ANCHORS, msg)?;
+        let block = self.parse_block(c)?;
+        Ok(self.add_expr(Expr::Block(block), c, start))
     }
 
     fn parse_var_decl(&mut self, c: &mut ParseCursor, start: Token) -> ParseResult<StmtId> {
@@ -862,7 +923,7 @@ impl<'a> ParseCursor<'a> {
 
     fn recover(&mut self, anchors: &[TokenKind]) {
         self.skip_while(|t| !anchors.contains(t));
-        self.skip_while(|t| *t == TokenKind::Semicolon); // also skip any trailing semicolon just in case
+        self.skip_while(|t| *t == TokenKind::Semicolon || *t == TokenKind::BraceR); // also skip any trailing semicolon just in case
 
         if !self.has_some() {
             // stay pointing at EOF token, or else next peek will go out of bounds
