@@ -51,9 +51,9 @@ impl<T: hash::Hash> Interner<T> {
         }
     }
 
-    pub fn is_interned(&self, val: &T) -> bool {
+    pub fn lookup(&self, val: &T) -> Option<u32> {
         let hash = hash(&val);
-        self.hash_to_id.get(&hash).is_some()
+        self.hash_to_id.get(&hash).copied()
     }
 
     pub fn add(&mut self, val: T) -> u32 {
