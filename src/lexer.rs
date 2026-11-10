@@ -225,7 +225,7 @@ pub enum LexError {
 
 #[derive(Debug)]
 pub struct Lexer {
-    pub input: String,
+    pub input: Box<str>,
     // TODO: is this really needed? we might find the line directly by scanning for the next one...
     pub line_offsets: Vec<u32>,
     pub tokens: Vec<Token>,
@@ -235,7 +235,7 @@ impl Lexer {
         Self {
             line_offsets: vec![0],
             tokens: vec![],
-            input,
+            input: input.into(),
         }
     }
 }

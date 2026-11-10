@@ -147,6 +147,7 @@ pub enum TypeErrorKind {
     ValueNotAssignable,
     ArgumentsInGenericParameter,
     BlockWithoutReturnExpr(Option<TypeId>),
+    InvalidControlStmtInBlock,
 
     SelfReferentialStruct(IdentId),
 }
@@ -178,6 +179,8 @@ pub struct Typechecker {
 
     substs: Unification,
 
+    loop_depth: u32,
+
     vars_typed: Vec<(StmtId, TypeId)>, // TODO: temporary solution, find fix
     pub errors: Vec<TypeError>,
 }
@@ -197,6 +200,7 @@ impl Default for Typechecker {
             structs: Default::default(),
 
             substs: Default::default(),
+            loop_depth: 0,
 
             vars_typed: vec![],
             errors: vec![],
@@ -535,23 +539,30 @@ impl Typechecker {
                 let ret_expected = info.ret;
                 let params = info.params.clone();
 
-                let ret_actual = env.with_var_scope(|env| {
+                let generics = info.generics.clone();
+                let ret_actual = env.with_ty_scope(|env| env.with_var_scope(|env| {
+                    for generic in generics {
+                        self.add_type(env, Type::Generic(generic));
+                    }
+
                     for (param_ty, param_content) in params.iter().zip(content.params.iter()) {
                         env.bind_var(param_content.0, *param_ty);
                     }
 
                     self.infer_block(env, ast, &content.code)
-                });
+                }));
 
                 let ret_actual = ret_actual?;
                 self.unify(env, ret_actual, ret_expected, span)?;
             }
 
             Stmt::StructDecl(_) => {} // Do nothing, already done in top level pass
+            Stmt::Continue | Stmt::Break => {
+              Err(tyerr(TypeErrorKind::InvalidControlStmtInBlock, span))?
+            }
 
             Stmt::Expr(_) => {
-                let err = tyerr(TypeErrorKind::InvalidStmtInGlobal, span);
-                Err(err)?
+                Err(tyerr(TypeErrorKind::InvalidStmtInGlobal, span))?
             }
         }
 
@@ -591,6 +602,10 @@ impl Typechecker {
 
                         _ => _ = self.infer(env, ast, *expr_id)?,
                     }
+                }
+
+                Stmt::Break | Stmt::Continue => if self.loop_depth == 0 {
+                  Err(tyerr(TypeErrorKind::InvalidControlStmtInBlock, span))?
                 }
 
                 Stmt::FuncDecl(_) | Stmt::StructDecl(_) => {
@@ -682,7 +697,10 @@ impl Typechecker {
 
             Expr::While { cond, code } => {
                 self.check(env, ast, *cond, BOOL_ID)?;
-                self.infer(env, ast, *code)?;
+                self.loop_depth += 1;
+                let res = self.infer(env, ast, *code);
+                self.loop_depth -= 1;
+                res?;
                 VOID_ID
             }
 

@@ -129,6 +129,8 @@ pub enum Stmt {
     FuncDecl(FuncContent),
     StructDecl(StructContent),
     Expr(ExprId),
+    Break,
+    Continue,
 }
 
 #[derive(Debug)]
@@ -685,15 +687,23 @@ impl Parser {
     }
 
     fn parse_stmt(&mut self, c: &mut ParseCursor) -> ParseResult<StmtId> {
-        let tok = c.advance();
+        let start = c.advance();
 
-        let id = match tok.kind {
-            TokenKind::Let => self.parse_var_decl(c, tok)?,
+        let id = match start.kind {
+            TokenKind::Let => self.parse_var_decl(c, start)?,
 
             TokenKind::Return => {
                 let expr = self.parse_expr(c, 0)?;
-                let ret = self.add_expr(Expr::Return(expr), c, tok);
-                self.add_stmt(Stmt::Expr(ret), c, tok)
+                let ret = self.add_expr(Expr::Return(expr), c, start);
+                self.add_stmt(Stmt::Expr(ret), c, start)
+            }
+
+            TokenKind::Continue => {
+              self.add_stmt(Stmt::Continue, c, start)
+            }
+
+            TokenKind::Break => {
+              self.add_stmt(Stmt::Break, c, start)
             }
 
             TokenKind::Fn => {
@@ -756,7 +766,7 @@ impl Parser {
                         code,
                     }),
                     c,
-                    tok,
+                    start,
                 )
             }
 
@@ -802,18 +812,18 @@ impl Parser {
                         fields,
                     }),
                     c,
-                    tok,
+                    start,
                 )
             }
 
-            TokenKind::Invalid => return Err(err_tok(ParseErrorKind::InvalidCharacter, tok)),
-            TokenKind::Eof => return Err(err_tok(ParseErrorKind::ReachedEof, tok)),
+            TokenKind::Invalid => return Err(err_tok(ParseErrorKind::InvalidCharacter, start)),
+            TokenKind::Eof => return Err(err_tok(ParseErrorKind::ReachedEof, start)),
 
             _ => {
                 // try to parse expression
                 c.undo();
                 let expr = self.parse_expr(c, 0)?;
-                self.add_stmt(Stmt::Expr(expr), c, tok)
+                self.add_stmt(Stmt::Expr(expr), c, start)
             }
         };
 
