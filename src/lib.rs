@@ -1,6 +1,6 @@
 pub mod ast;
-pub mod checker;
 // pub mod emitter;
+mod checker;
 mod intern;
 pub mod lexer;
 pub mod parser;

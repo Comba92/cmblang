@@ -1,4 +1,4 @@
-use crate::{UnionFind::UnionFind, intern::*, *};
+use crate::{intern::*, *};
 use std::collections::{HashMap, HashSet};
 
 // https://www.reddit.com/r/ProgrammingLanguages/comments/v5zwlw/resources_for_building_a_typechecker/
@@ -13,87 +13,67 @@ use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Default)]
 pub struct TypeId(pub Id);
-struct Environment {
-    vars: Vec<HashMap<IdentId, TypeId>>,
-    types: Vec<HashSet<TypeId>>,
+
+pub struct Environment {
+    vars_scopes: Vec<HashMap<IdentId, TypeId>>,
+    ty_scopes: Vec<HashSet<TypeId>>,
 }
+
 impl Default for Environment {
     fn default() -> Self {
+        let mut types = Interner::new();
+        for primitive in PRIMITIVES {
+            let id = types.add(primitive.0.clone());
+            debug_assert_eq!(id, primitive.1.0);
+        }
+
         Self {
-            vars: vec![HashMap::new()],
-            types: vec![PRIMITIVES.iter().map(|p| p.1).collect()],
+            vars_scopes: vec![HashMap::new()],
+            ty_scopes: vec![PRIMITIVES.iter().map(|p| p.1).collect()],
         }
     }
 }
+
 impl Environment {
+    // ---- variables ----
     fn lookup_var(&self, name: IdentId) -> Option<TypeId> {
-        for scope in self.vars.iter().rev() {
+        for scope in self.vars_scopes.iter().rev() {
             if let Some(ty) = scope.get(&name) {
                 return Some(*ty);
             }
         }
-
         None
     }
 
     fn lookup_global_var(&self, name: IdentId) -> Option<TypeId> {
-        self.vars.first().unwrap().get(&name).copied()
+        self.vars_scopes.first().unwrap().get(&name).copied()
     }
 
     // TODO: check if value already exists
     fn bind_var(&mut self, name: IdentId, ty: TypeId) {
-        self.vars.last_mut().unwrap().insert(name, ty);
+        self.vars_scopes.last_mut().unwrap().insert(name, ty);
     }
 
-    fn add_ty(&mut self, ty: TypeId) {
-        self.types.last_mut().unwrap().insert(ty);
+    fn ty_exists(&self, ty: TypeId) -> bool {
+        self.ty_scopes.iter().rev().any(|scope| scope.contains(&ty))
     }
 
-    fn exists_ty(&self, ty: TypeId) -> bool {
-        for scope in self.types.iter().rev() {
-            if scope.contains(&ty) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    // TODO: this is dangerous. Every push NEEDS a relative POP or else we risk of gertting unwanted state.
-    // a push operation with a callback that automatically pops after the callback should be ideal
-    // hoewever that requires mutable access to the whole environment struct, currently it is inside the typechecker struct
-    // we would need to extract it from there and pass it separately to every typechker function
-    fn push_var_scope(&mut self) {
-        self.vars.push(HashMap::new())
-    }
-
-    fn push_var_scope_with<F: FnOnce() -> TypeResult<()>>(
-        &mut self,
-        callback: F,
-    ) -> TypeResult<()> {
-        self.push_var_scope();
-        let res = callback();
-        self.pop_var_scope();
+    // ---- scopes ----
+    // push/pop are only reachable through these, so they can't get unbalanced.
+    // the callback receives the environment back, since the caller's closure
+    // can't capture it while we hold &mut self.
+    fn with_var_scope<T>(&mut self, f: impl FnOnce(&mut Environment) -> T) -> T {
+        self.vars_scopes.push(HashMap::new());
+        let res = f(self);
+        self.vars_scopes.pop();
         res
     }
 
-    fn pop_var_scope(&mut self) {
-        self.vars.pop();
-    }
-
-    fn push_ty_scope(&mut self) {
-        self.types.push(HashSet::new())
-    }
-
-    fn push_ty_scope_with<F: FnOnce() -> TypeResult<()>>(&mut self, callback: F) -> TypeResult<()> {
-        self.push_var_scope();
-        let res = callback();
-        self.pop_var_scope();
+    fn with_ty_scope<T>(&mut self, f: impl FnOnce(&mut Environment) -> T) -> T {
+        self.ty_scopes.push(HashSet::new());
+        let res = f(self);
+        self.ty_scopes.pop();
         res
-    }
-
-    fn pop_ty_scope(&mut self) {
-        self.types.pop();
     }
 }
 
@@ -103,14 +83,8 @@ pub enum Type {
     Integer,
     Float,
     Bool,
-    // Hole,
     Generic(IdentId),
     Unknown(u32),
-    // Array {
-    //     inner: TypeId,
-    //     size: u32,
-    // },
-    // Tuple(List<TypeId>),
     Func { params: List<TypeId>, ret: TypeId },
     UserDef { args: List<TypeId>, name: IdentId },
 }
@@ -137,7 +111,6 @@ const HOLE_ID: TypeId = TypeId(4);
 
 const PRIMITIVES: &[(Type, TypeId)] = &[
     (Type::Void, VOID_ID),
-    // (Type::Hole, HOLE_ID),
     (Type::Bool, BOOL_ID),
     (Type::Integer, INT_ID),
     (Type::Float, FLOAT_ID),
@@ -193,11 +166,9 @@ impl Unification {
 }
 
 pub struct Typechecker {
-    env: Environment,
-    pub types: Interner<Type>,
-
     pub funcs: HashMap<IdentId, FuncInfo>,
     pub structs: HashMap<IdentId, StructInfo>,
+    pub types: Interner<Type>,
 
     substs: Unification,
 
@@ -214,7 +185,6 @@ impl Default for Typechecker {
         }
 
         Self {
-            env: Environment::default(),
             types,
 
             funcs: Default::default(),
@@ -229,7 +199,7 @@ impl Default for Typechecker {
 }
 
 fn type_to_annotation(ty_id: TypeId, tc: &Typechecker, ast: &mut Ast) -> TyAnnotId {
-    let annot = match tc.get_ty(ty_id) {
+    let annot = match tc.get_type(ty_id) {
         Type::Void => TyAnnot::Type {
             name: IdentId(ast.idents.add("void")),
             args: Default::default(),
@@ -253,7 +223,6 @@ fn type_to_annotation(ty_id: TypeId, tc: &Typechecker, ast: &mut Ast) -> TyAnnot
 
         Type::Unknown(_) => unreachable!("can't convert a type var to a type annotation"),
 
-        // we're supposed to get an instanciated function here??
         Type::Func { params, ret, .. } => {
             let mut list = Vec::new();
             for param in params {
@@ -267,55 +236,53 @@ fn type_to_annotation(ty_id: TypeId, tc: &Typechecker, ast: &mut Ast) -> TyAnnot
                 ret: Some(ret),
             }
         }
-        Type::UserDef { name, args } => {
-            // we're supposed to get back the generics here?
-            TyAnnot::Type {
-                name: *name,
-                args: args
-                    .iter()
-                    .map(|a| type_to_annotation(*a, tc, ast))
-                    .collect(),
-            }
-        } // Type::Array { inner, size } => TyAnnot::Array {
-          //     inner: type_to_annotation(*inner, tc, ast),
-          //     size: todo!("array types not implemented yet"),
-          // },
-          // Type::Tuple(list) => todo!("tuple not implemented yet"),
+        Type::UserDef { name, args } => TyAnnot::Type {
+            name: *name,
+            args: args
+                .iter()
+                .map(|a| type_to_annotation(*a, tc, ast))
+                .collect(),
+        },
     };
 
     ast.add_ty_annot(annot)
 }
 
 impl Typechecker {
-    fn add_type(&mut self, ty: Type) -> TypeId {
+    fn add_type(&mut self, env: &mut Environment, ty: Type) -> TypeId {
         let id = self.types.add(ty);
         let id = TypeId(id as Id);
-        self.env.add_ty(id);
+        env.ty_scopes.last_mut().unwrap().insert(id);
         id
     }
 
-    fn add_unknown_ty(&mut self) -> TypeId {
+    fn add_unknown_ty(&mut self, env: &mut Environment) -> TypeId {
         let id = self.substs.fresh();
-        self.add_type(Type::Unknown(id))
+        self.add_type(env, Type::Unknown(id))
     }
 
-    fn get_ty(&self, id: TypeId) -> &Type {
+    fn get_type(&self, id: TypeId) -> &Type {
         self.types.get(id.0)
     }
 
-    fn lookup_ty(&self, ty: &Type) -> Option<TypeId> {
+    fn lookup_ty(&self, env: &Environment, ty: &Type) -> Option<TypeId> {
         self.types
             .lookup(ty)
             .map(|id| TypeId(id))
-            .filter(|id| self.env.exists_ty(*id))
+            .filter(|id| env.ty_exists(*id))
     }
 
-    fn report_error(&mut self, ast: &Ast, e: TypeError) {
+    fn report_error(&mut self, e: TypeError) {
         self.errors.push(e);
     }
 
     // usually called "resolve"
-    fn add_type_from_annotation(&mut self, ast: &Ast, annot_id: TyAnnotId) -> TypeResult<TypeId> {
+    fn add_type_from_annotation(
+        &mut self,
+        env: &mut Environment,
+        ast: &Ast,
+        annot_id: TyAnnotId,
+    ) -> TypeResult<TypeId> {
         let (annot, span) = ast.get_annot(annot_id);
         let ty = match annot {
             TyAnnot::Type { name, args } => {
@@ -334,7 +301,7 @@ impl Typechecker {
 
                             let mut list = Vec::new();
                             for arg in args {
-                                let ty_id = self.add_type_from_annotation(ast, *arg)?;
+                                let ty_id = self.add_type_from_annotation(env, ast, *arg)?;
                                 list.push(ty_id);
                             }
 
@@ -344,7 +311,7 @@ impl Typechecker {
                             }
                         } else {
                             // it has to be a generic parameter
-                            if let Some(id) = self.lookup_ty(&Type::Generic(*name)) {
+                            if let Some(id) = self.lookup_ty(env, &Type::Generic(*name)) {
                                 return Ok(id);
                             } else {
                                 Err(tyerr(TypeErrorKind::UndeclaredType, span))?
@@ -355,24 +322,18 @@ impl Typechecker {
             }
 
             TyAnnot::Array { inner, size } => {
-                // let inner_id = self.add_annotation_as_type(ast, *inner);
-                // // TODO: size not handled right now
-                // Type::Array {
-                //     inner: inner_id,
-                //     size: 0,
-                // }
                 todo!("array not implemented")
             }
 
             TyAnnot::Func { params, ret } => {
                 let mut list = Vec::new();
                 for param in params {
-                    let id = self.add_type_from_annotation(ast, *param)?;
+                    let id = self.add_type_from_annotation(env, ast, *param)?;
                     list.push(id);
                 }
 
                 let ret = if let Some(ret) = ret {
-                    self.add_type_from_annotation(ast, *ret)?
+                    self.add_type_from_annotation(env, ast, *ret)?
                 } else {
                     VOID_ID
                 };
@@ -386,41 +347,41 @@ impl Typechecker {
             TyAnnot::Tuple(elems) => {
                 let mut list = Vec::new();
                 for elem in elems {
-                    let id = self.add_type_from_annotation(ast, *elem)?;
+                    let id = self.add_type_from_annotation(env, ast, *elem)?;
                     list.push(id);
                 }
                 todo!(" tuple not implemented")
-                // Type::Tuple(list.into())
             }
         };
 
-        Ok(self.add_type(ty))
+        Ok(self.add_type(env, ty))
     }
 
     fn var_decl(
         &mut self,
+        env: &mut Environment,
         ast: &Ast,
         var: &VarContent,
         stmt_id: StmtId,
         span: &Span,
     ) -> TypeResult<()> {
         let final_ty = if let Some(ty_annot) = var.ty {
-            let annot_id = self.add_type_from_annotation(ast, ty_annot)?;
-            self.check(ast, var.rhs, annot_id)
+            let annot_id = self.add_type_from_annotation(env, ast, ty_annot)?;
+            self.check(env, ast, var.rhs, annot_id)
                 .map_err(|e| tyerr(TypeErrorKind::WrongAnnotation { cause: Box::new(e) }, span))?;
 
             annot_id
         } else {
-            self.infer(ast, var.rhs)?
+            self.infer(env, ast, var.rhs)?
         };
 
-        self.env.bind_var(var.name, final_ty);
+        env.bind_var(var.name, final_ty);
         self.vars_typed.push((stmt_id, final_ty));
 
         Ok(())
     }
 
-    fn first_pass(&mut self, ast: &Ast, stmt_id: StmtId) -> TypeResult<()> {
+    fn first_pass(&mut self, _env: &mut Environment, ast: &Ast, stmt_id: StmtId) -> TypeResult<()> {
         // this pass only collects the structs names and arguments
         // a struct can reference another struct which might be not yet declared
 
@@ -448,7 +409,7 @@ impl Typechecker {
         Ok(())
     }
 
-    fn second_pass(&mut self, ast: &Ast, stmt_id: StmtId) -> TypeResult<()> {
+    fn second_pass(&mut self, env: &mut Environment, ast: &Ast, stmt_id: StmtId) -> TypeResult<()> {
         let (stmt, span) = ast.get_stmt(stmt_id);
         match stmt {
             Stmt::FuncDecl(content) => {
@@ -463,54 +424,31 @@ impl Typechecker {
                     return Err(tyerr(TypeErrorKind::DuplicateParamsInFunction, span));
                 }
 
-                self.env.push_ty_scope();
+                let (params, ret) = env.with_ty_scope(|env| -> TypeResult<_> {
+                    for generic in &content.generics {
+                        self.add_type(env, Type::Generic(*generic));
+                    }
 
-                for generic in &content.generics {
-                    self.add_type(Type::Generic(*generic));
-                }
-
-                // TODO: temporary fix >:P
-                fn add_fn_types(
-                    tc: &mut Typechecker,
-                    ast: &Ast,
-                    content: &FuncContent,
-                ) -> TypeResult<(Vec<TypeId>, TypeId)> {
-                    // add fn type to types list and to global scope
                     let ret = if let Some(ret) = content.ret {
-                        tc.add_type_from_annotation(ast, ret)?
+                        self.add_type_from_annotation(env, ast, ret)?
                     } else {
                         VOID_ID
                     };
+
                     let mut params = Vec::new();
                     for param in &content.params {
-                        params.push(tc.add_type_from_annotation(ast, param.1)?);
+                        params.push(self.add_type_from_annotation(env, ast, param.1)?);
                     }
 
                     Ok((params, ret))
-                }
-
-                let res = add_fn_types(self, ast, content);
-                self.env.pop_ty_scope();
-
-                let (params, ret) = res?;
-
-                // // add fn type to types list and to global scope
-                // let ret = if let Some(ret) = content.ret {
-                //     self.add_type_from_annotation(ast, ret)?
-                // } else {
-                //     VOID_ID
-                // };
-                // let mut params = Vec::new();
-                // for param in &content.params {
-                //     params.push(self.add_type_from_annotation(ast, param.1)?);
-                // }
+                })?;
 
                 let ty = Type::Func {
                     params: params.clone().into(),
                     ret,
                 };
 
-                let ty_id = self.add_type(ty);
+                let ty_id = self.add_type(env, ty);
 
                 self.funcs.insert(
                     content.name,
@@ -522,7 +460,7 @@ impl Typechecker {
                 );
 
                 // TODO: can we shadow function names?
-                self.env.bind_var(content.name, ty_id);
+                env.bind_var(content.name, ty_id);
             }
 
             Stmt::StructDecl(content) => {
@@ -530,64 +468,28 @@ impl Typechecker {
                     return Err(tyerr(TypeErrorKind::DuplicateFieldsInStruct, span));
                 }
 
-                // TODO: check for self referencing type
+                let fields = env.with_ty_scope(|env| -> TypeResult<_> {
+                    for generic in &content.generics {
+                        self.add_type(env, Type::Generic(*generic));
+                    }
 
-                self.env.push_ty_scope();
-
-                for generic in &content.generics {
-                    self.add_type(Type::Generic(*generic));
-                }
-
-                // TODO: temporary fix >:P
-                fn add_struct_types(
-                    tc: &mut Typechecker,
-                    ast: &Ast,
-                    content: &StructContent,
-                ) -> TypeResult<Vec<(IdentId, TypeId)>> {
                     let mut fields = Vec::new();
                     for field in &content.fields {
-                        let ty_id = tc.add_type_from_annotation(ast, field.1)?;
-                        tc.ty_self_referential_check(ty_id, content.name)?;
+                        let ty_id = self.add_type_from_annotation(env, ast, field.1)?;
+                        self.ty_self_referential_check(ty_id, content.name)?;
 
                         fields.push((field.0, ty_id));
                     }
 
                     Ok(fields)
-                }
-
-                let res = add_struct_types(self, ast, content);
-                self.env.pop_ty_scope();
+                });
 
                 let info = self
                     .structs
                     .get_mut(&content.name)
                     .ok_or_else(|| tyerr(TypeErrorKind::UndeclaredType, span))?;
 
-                info.fields = res?.into();
-
-                // let mut generics = Vec::new();
-                // for generic in &content.generics {
-                //     generics.push(self.add_type(Type::Generic(*generic)));
-                // }
-
-                // TODO: do we really have to do this?
-                // or do we always query for struct info?
-                //                 let ty = Type::UserDef {
-                //                     args: generics.into(),
-                //                     name: content.name,
-                //                 };
-                //
-                //                 let ty_id = self.add_type(ty);
-
-                // self.structs.insert(
-                //     content.name,
-                //     StructInfo {
-                //         // ty_id,
-                //         generics: content.generics.clone(),
-                //         name: content.name,
-                //         fields: fields.into(),
-                //     },
-                // );
+                info.fields = fields?.into();
             }
             _ => {}
         }
@@ -595,56 +497,30 @@ impl Typechecker {
         Ok(())
     }
 
-    fn typecheck(&mut self, ast: &Ast, stmt_id: StmtId) -> TypeResult<()> {
+    fn typecheck(&mut self, env: &mut Environment, ast: &Ast, stmt_id: StmtId) -> TypeResult<()> {
         let (stmt, span) = ast.get_stmt(stmt_id);
         match stmt {
-            Stmt::VarDecl(content) => self.var_decl(ast, content, stmt_id, span)?,
+            Stmt::VarDecl(content) => self.var_decl(env, ast, content, stmt_id, span)?,
 
             Stmt::FuncDecl(content) => {
-                //                 let func = self
-                //                     .env
-                //                     .lookup(content.name)
-                //                     .ok_or_else(|| tyerr(TypeErrorKind::UndeclaredVar, span))?;
-                //
-                //                 match self.get_type(func).clone() {
-                //                     Type::Func {
-                //                         params,
-                //                         ret: ret_expected,
-                //                         ..
-                //                     } => {
-                //                         self.env.push_scope();
-                //                         for (param_ty, param_content) in params.iter().zip(content.params.iter()) {
-                //                             self.env.bind(param_content.0, *param_ty);
-                //                         }
-                //
-                //                         let ret_actual = self.infer_block(ast, &content.code);
-                //                         self.env.pop_scope();
-                //
-                //                         let ret_actual = ret_actual?;
-                //                         self.unify(ret_actual, ret_expected, span)?;
-                //                     }
-                //
-                //                     _ => unreachable!(
-                //                         "function type should already be in global scope after name resolution pass"
-                //                     ),
-                //                 }
-
                 let info = self
                     .funcs
                     .get(&content.name)
                     .ok_or_else(|| tyerr(TypeErrorKind::UndeclaredVar, span))?;
 
-                self.env.push_var_scope();
-                for (param_ty, param_content) in info.params.iter().zip(content.params.iter()) {
-                    self.env.bind_var(param_content.0, *param_ty);
-                }
-
                 let ret_expected = info.ret;
-                let ret_actual = self.infer_block(ast, &content.code);
-                self.env.pop_var_scope();
+                let params = info.params.clone();
+
+                let ret_actual = env.with_var_scope(|env| {
+                    for (param_ty, param_content) in params.iter().zip(content.params.iter()) {
+                        env.bind_var(param_content.0, *param_ty);
+                    }
+
+                    self.infer_block(env, ast, &content.code)
+                });
 
                 let ret_actual = ret_actual?;
-                self.unify(ret_actual, ret_expected, span)?;
+                self.unify(env, ret_actual, ret_expected, span)?;
             }
 
             Stmt::StructDecl(_) => {} // Do nothing, already done in top level pass
@@ -658,16 +534,20 @@ impl Typechecker {
         Ok(())
     }
 
-    fn infer_block(&mut self, ast: &Ast, block: &Block) -> TypeResult<TypeId> {
+    fn infer_block(
+        &mut self,
+        env: &mut Environment,
+        ast: &Ast,
+        block: &Block,
+    ) -> TypeResult<TypeId> {
         let mut ret_ty = None;
 
         // iter over all except the last
         // this is important because otherwise we would add two different type variables for the last expression and incurr in a type error
         for stmt_id in block.list.iter().rev().skip(1).rev().copied() {
-            // let stmt_id = StmtId(stmt_iter);
             let (stmt, span) = ast.get_stmt(stmt_id);
             match stmt {
-                Stmt::VarDecl(content) => self.var_decl(ast, content, stmt_id, span)?,
+                Stmt::VarDecl(content) => self.var_decl(env, ast, content, stmt_id, span)?,
 
                 Stmt::Expr(expr_id) => {
                     let (expr, _) = ast.get_expr(*expr_id);
@@ -676,15 +556,15 @@ impl Typechecker {
                         Expr::Return(expr_id) => match ret_ty {
                             None => {
                                 // we found the first return epxr.
-                                ret_ty = Some(self.infer(ast, *expr_id)?);
+                                ret_ty = Some(self.infer(env, ast, *expr_id)?);
                             }
                             Some(found_ret_ty) => {
-                                // we found another return expr. all other return statement should have the same type as the first.
-                                self.check(ast, *expr_id, found_ret_ty)?;
+                                // all other return statements should have the same type as the first.
+                                self.check(env, ast, *expr_id, found_ret_ty)?;
                             }
                         },
 
-                        _ => _ = self.infer(ast, *expr_id)?,
+                        _ => _ = self.infer(env, ast, *expr_id)?,
                     }
                 }
 
@@ -693,8 +573,6 @@ impl Typechecker {
                     Err(err)?
                 }
             };
-
-            // stmt_iter += 1;
         }
 
         // check last expression
@@ -705,12 +583,10 @@ impl Typechecker {
             match stmt {
                 Stmt::Expr(expr) => match ret_ty {
                     None => {
-                        // we found the first return epxr.
-                        ret_ty = Some(self.infer(ast, *expr)?);
+                        ret_ty = Some(self.infer(env, ast, *expr)?);
                     }
                     Some(found_ret_ty) => {
-                        // we found another return expr. all other return statement should have the same type as the first.
-                        self.check(ast, *expr, found_ret_ty)?;
+                        self.check(env, ast, *expr, found_ret_ty)?;
                     }
                 },
 
@@ -722,42 +598,36 @@ impl Typechecker {
         Ok(ret_ty.unwrap_or(VOID_ID))
     }
 
-    fn infer(&mut self, ast: &Ast, expr: ExprId) -> TypeResult<TypeId> {
+    fn infer(&mut self, env: &mut Environment, ast: &Ast, expr: ExprId) -> TypeResult<TypeId> {
         let (expr, span) = ast.get_expr(expr);
         let id = match expr {
             Expr::BoolLiteral(_) => BOOL_ID,
             Expr::IntLiteral(_) => INT_ID,
             Expr::FloatLiteral(_) => FLOAT_ID,
 
-            Expr::Grouping(expr) => self.infer(ast, *expr)?,
+            Expr::Grouping(expr) => self.infer(env, ast, *expr)?,
 
             // TODO: be careful. we can assign type variables to a variable (just think of a generic function)
             // A generic function is not instantiated, so what do we really assign to the variable?
-            // We could infer the acctual function type by successive calls, however, that function can be only ONE thing (monomorphic) and not be polymorphic
             Expr::Variable(name) => {
-                let ty = self
-                    .env
+                let ty = env
                     .lookup_var(*name)
                     .ok_or_else(|| tyerr(TypeErrorKind::UndeclaredVar, span))?;
 
-                // for some reason we have to do this
-                // bet its because if a variable is a generic, we would instantiate it,
-                match self.get_ty(ty) {
-                    Type::Generic(_) => ty, // if we're getting a generic from a variable, it means we are inside a function declaration. WE DON'T HAVE to instantiate it
-                    _ => self.ty_instantiate(ty, &mut HashMap::new()),
+                match self.get_type(ty) {
+                    // if we're getting a generic from a variable, we are inside a function declaration. WE DON'T HAVE to instantiate it
+                    Type::Generic(_) => ty,
+                    _ => self.ty_instantiate(env, ty, &mut HashMap::new()),
                 }
-
-                // this doesnt work because it also instantiates generics, which we dont want here
-                // self.ty_instantiate(ty, &mut HashMap::new())
             }
 
-            Expr::Return(id) => self.infer(ast, *id)?,
+            Expr::Return(id) => self.infer(env, ast, *id)?,
 
             // TODO: right now, no way to check if operand amits the operation between types
-            Expr::Unary { op, rhs } => self.infer(ast, *rhs)?,
+            Expr::Unary { op, rhs } => self.infer(env, ast, *rhs)?,
             Expr::Binary { op, lhs, rhs } => {
-                let lhs_ty = self.infer(ast, *lhs)?;
-                self.check(ast, *rhs, lhs_ty)?;
+                let lhs_ty = self.infer(env, ast, *lhs)?;
+                self.check(env, ast, *rhs, lhs_ty)?;
                 lhs_ty
             }
             Expr::Ternary {
@@ -765,9 +635,9 @@ impl Typechecker {
                 first,
                 second,
             } => {
-                self.check(ast, *cond, BOOL_ID)?;
-                let ty = self.infer(ast, *first)?;
-                self.check(ast, *second, ty)?;
+                self.check(env, ast, *cond, BOOL_ID)?;
+                let ty = self.infer(env, ast, *first)?;
+                self.check(env, ast, *second, ty)?;
                 ty
             }
 
@@ -776,32 +646,31 @@ impl Typechecker {
                 first,
                 second,
             } => {
-                self.check(ast, *cond, BOOL_ID)?;
-                let first_ty = self.infer(ast, *first)?;
+                self.check(env, ast, *cond, BOOL_ID)?;
+                let first_ty = self.infer(env, ast, *first)?;
                 if let Some(second) = second {
-                    self.check(ast, *second, first_ty)?;
+                    self.check(env, ast, *second, first_ty)?;
                 }
 
                 first_ty
             }
 
             Expr::While { cond, code } => {
-                self.check(ast, *cond, BOOL_ID)?;
-                self.infer(ast, *code)?;
+                self.check(env, ast, *cond, BOOL_ID)?;
+                self.infer(env, ast, *code)?;
                 VOID_ID
             }
 
             Expr::Call { callee, args } => {
-                let ty_id = self.infer(ast, *callee)?;
-                match self.get_ty(ty_id).clone() {
+                let ty_id = self.infer(env, ast, *callee)?;
+                match self.get_type(ty_id).clone() {
                     Type::Unknown(id) => {
                         todo!("figure this one out");
                     }
 
                     Type::Func { params, ret } => {
-                        // we must clone to both access params and do check
                         for (param, arg) in params.iter().zip(args.iter()) {
-                            self.check(ast, *arg, *param)?;
+                            self.check(env, ast, *arg, *param)?;
                         }
 
                         if params.len() != args.len() {
@@ -822,7 +691,6 @@ impl Typechecker {
                         return Err(tyerr(TypeErrorKind::WrongStructLiteralCount, span));
                     }
 
-                    // we must clone to both access fields and do check
                     let mut generics = Vec::new();
                     for ((field_name, field_ty), (value_name, value)) in
                         info.fields.iter().zip(args.iter())
@@ -831,35 +699,28 @@ impl Typechecker {
                             return Err(tyerr(TypeErrorKind::WrongStructLiteralField, span));
                         }
 
-                        match self.get_ty(*field_ty) {
+                        match self.get_type(*field_ty) {
                             Type::Generic(_) => {
-                                let value_ty = self.infer(ast, *value)?;
+                                let value_ty = self.infer(env, ast, *value)?;
                                 generics.push(value_ty);
                             }
-                            _ => self.check(ast, *value, *field_ty)?,
+                            _ => self.check(env, ast, *value, *field_ty)?,
                         };
                     }
 
-                    self.add_type(Type::UserDef {
-                        args: generics.into(),
-                        name: *name,
-                    })
+                    self.add_type(
+                        env,
+                        Type::UserDef {
+                            args: generics.into(),
+                            name: *name,
+                        },
+                    )
                 } else {
                     Err(tyerr(TypeErrorKind::UndeclaredType, span))?
                 }
             }
 
             Expr::Indexing { src, idx } => {
-                //                 self.check(ast, *idx, INT_ID)?;
-                //
-                //                 let ty = self.infer(ast, *src)?;
-                //                 match self.get_type(ty) {
-                //                     Type::Array { inner, size } => {
-                //                         // TODO: we might even do constant bound checking here
-                //                         *inner
-                //                     }
-                //                     _ => Err(tyerr(TypeErrorKind::IndexingWithWrongType, span))?,
-                //                 }
                 todo!("array not implemented")
             }
 
@@ -867,58 +728,48 @@ impl Typechecker {
                 todo!("structs not implemented yet")
             }
 
-            Expr::Block(block) => {
-                self.env.push_var_scope();
-                let res = self.infer_block(ast, block);
-                self.env.pop_var_scope();
-                res?
-            }
+            Expr::Block(block) => env.with_var_scope(|env| self.infer_block(env, ast, block))?,
         };
 
         Ok(id)
     }
 
-    fn check(&mut self, ast: &Ast, expr_id: ExprId, expected_ty: TypeId) -> TypeResult<()> {
-        let (expr, span) = ast.get_expr(expr_id);
+    fn check(
+        &mut self,
+        env: &mut Environment,
+        ast: &Ast,
+        expr_id: ExprId,
+        expected_ty: TypeId,
+    ) -> TypeResult<()> {
+        let (_, span) = ast.get_expr(expr_id);
 
-        match expr {
-            // Expr::BoolLiteral(_) => BOOL_ID,
-            // Expr::IntLiteral(_) => INT_ID,
-            // Expr::FloatLiteral(_) => FLOAT_ID,
-            _ => {
-                let inferred_ty = self.infer(ast, expr_id)?;
-                self.unify(expected_ty, inferred_ty, span)?;
-            }
-        };
+        let inferred_ty = self.infer(env, ast, expr_id)?;
+        self.unify(env, expected_ty, inferred_ty, span)?;
 
         Ok(())
     }
 
-    fn unify(&mut self, ty_id_a: TypeId, ty_id_b: TypeId, span: &Span) -> TypeResult<()> {
-        let ty_id_a = self.ty_normalize(ty_id_a);
-        let ty_id_b = self.ty_normalize(ty_id_b);
+    fn unify(
+        &mut self,
+        env: &Environment,
+        ty_id_a: TypeId,
+        ty_id_b: TypeId,
+        span: &Span,
+    ) -> TypeResult<()> {
+        let ty_id_a = self.ty_normalize(env, ty_id_a);
+        let ty_id_b = self.ty_normalize(env, ty_id_b);
 
-        let ty_a = self.get_ty(ty_id_a).clone();
-        let ty_b = self.get_ty(ty_id_b).clone();
+        // TODO: moving the types interner to environment would not require cloning here anymore, but thats a design choice
+        let ty_a = self.get_type(ty_id_a).clone();
+        let ty_b = self.get_type(ty_id_b).clone();
 
         match (ty_a, ty_b) {
-            // (Type::Unknown(x), Type::Unknown(y)) => {
-            //     if x != y {
-            //         return Err(tyerr(
-            //             TypeErrorKind::TypeMismatch {
-            //                 a: self.get_ty(ty_id_a).clone(),
-            //                 b: self.get_ty(ty_id_b).clone(),
-            //             },
-            //             span,
-            //         ));
-            //     }
-            // }
             (Type::Unknown(x), _) => {
                 if self.ty_occurs_check(ty_id_b, x) {
                     return Err(tyerr(
                         TypeErrorKind::InfiniteType {
-                            source: self.get_ty(ty_id_b).clone(),
-                            contains: self.get_ty(ty_id_a).clone(),
+                            source: self.get_type(ty_id_b).clone(),
+                            contains: self.get_type(ty_id_a).clone(),
                         },
                         span,
                     ));
@@ -930,8 +781,8 @@ impl Typechecker {
                 if self.ty_occurs_check(ty_id_a, x) {
                     return Err(tyerr(
                         TypeErrorKind::InfiniteType {
-                            source: self.get_ty(ty_id_a).clone(),
-                            contains: self.get_ty(ty_id_b).clone(),
+                            source: self.get_type(ty_id_a).clone(),
+                            contains: self.get_type(ty_id_b).clone(),
                         },
                         span,
                     ));
@@ -949,8 +800,8 @@ impl Typechecker {
                 if x != y {
                     return Err(tyerr(
                         TypeErrorKind::TypeMismatch {
-                            a: self.get_ty(ty_id_a).clone(),
-                            b: self.get_ty(ty_id_b).clone(),
+                            a: self.get_type(ty_id_a).clone(),
+                            b: self.get_type(ty_id_b).clone(),
                         },
                         span,
                     ));
@@ -970,10 +821,10 @@ impl Typechecker {
                 },
             ) => {
                 for (param_l, param_r) in params_l.iter().zip(params_r.iter()) {
-                    self.unify(*param_l, *param_r, span)?;
+                    self.unify(env, *param_l, *param_r, span)?;
                 }
 
-                self.unify(ret_l, ret_r, span)?;
+                self.unify(env, ret_l, ret_r, span)?;
             }
 
             (
@@ -991,23 +842,23 @@ impl Typechecker {
                 if name_l != name_r {
                     return Err(tyerr(
                         TypeErrorKind::TypeMismatch {
-                            a: self.get_ty(ty_id_a).clone(),
-                            b: self.get_ty(ty_id_b).clone(),
+                            a: self.get_type(ty_id_a).clone(),
+                            b: self.get_type(ty_id_b).clone(),
                         },
                         span,
                     ));
                 }
 
                 for (arg_l, arg_r) in args_l.iter().zip(args_r.iter()) {
-                    self.unify(*arg_l, *arg_r, span)?;
+                    self.unify(env, *arg_l, *arg_r, span)?;
                 }
             }
 
             _ => {
                 return Err(tyerr(
                     TypeErrorKind::TypeMismatch {
-                        a: self.get_ty(ty_id_a).clone(),
-                        b: self.get_ty(ty_id_b).clone(),
+                        a: self.get_type(ty_id_a).clone(),
+                        b: self.get_type(ty_id_b).clone(),
                     },
                     span,
                 ));
@@ -1018,11 +869,11 @@ impl Typechecker {
     }
 
     // get the solved type from a type variable
-    fn ty_normalize(&mut self, ty: TypeId) -> TypeId {
-        match self.get_ty(ty) {
+    fn ty_normalize(&self, env: &Environment, ty: TypeId) -> TypeId {
+        match self.get_type(ty) {
             Type::Unknown(x) => {
                 if let Some(parent) = self.substs.0[*x as usize] {
-                    self.ty_normalize(parent)
+                    self.ty_normalize(env, parent)
                 } else {
                     ty
                 }
@@ -1039,39 +890,49 @@ impl Typechecker {
 
     // instantiate a generic type to a concrete one
     // generic arguments are converted to type variables
-    // TODO: consider using an HashMap<IdentId, FreshId> as it is cleaner
-    fn ty_instantiate(&mut self, ty: TypeId, generics: &mut HashMap<IdentId, TypeId>) -> TypeId {
-        match self.get_ty(ty).clone() {
+    fn ty_instantiate(
+        &mut self,
+        env: &mut Environment,
+        ty: TypeId,
+        generics: &mut HashMap<IdentId, TypeId>,
+    ) -> TypeId {
+        match self.get_type(ty).clone() {
             Type::Func { params, ret, .. } => {
                 let instantiated = params
                     .iter()
-                    .map(|p| self.ty_instantiate(*p, generics))
+                    .map(|p| self.ty_instantiate(env, *p, generics))
                     .collect();
-                let ret_instantiated = self.ty_instantiate(ret, generics);
+                let ret_instantiated = self.ty_instantiate(env, ret, generics);
 
-                self.add_type(Type::Func {
-                    params: instantiated,
-                    ret: ret_instantiated,
-                })
+                self.add_type(
+                    env,
+                    Type::Func {
+                        params: instantiated,
+                        ret: ret_instantiated,
+                    },
+                )
             }
 
             Type::UserDef { name, args } => {
                 let instanciated = args
                     .iter()
-                    .map(|a| self.ty_instantiate(*a, generics))
+                    .map(|a| self.ty_instantiate(env, *a, generics))
                     .collect();
 
-                self.add_type(Type::UserDef {
-                    args: instanciated,
-                    name,
-                })
+                self.add_type(
+                    env,
+                    Type::UserDef {
+                        args: instanciated,
+                        name,
+                    },
+                )
             }
 
             Type::Generic(name) => {
                 if let Some(fresh) = generics.get(&name) {
                     *fresh
                 } else {
-                    let fresh = self.add_unknown_ty();
+                    let fresh = self.add_unknown_ty(env);
                     generics.insert(name, fresh);
                     fresh
                 }
@@ -1083,7 +944,7 @@ impl Typechecker {
 
     // check for self-referencing type variables
     fn ty_occurs_check(&self, ty: TypeId, ty_var: u32) -> bool {
-        match self.get_ty(ty) {
+        match self.get_type(ty) {
             Type::Void | Type::Bool | Type::Integer | Type::Float => false,
             Type::Generic(_) => false,
             Type::Func { params, ret } => {
@@ -1096,7 +957,7 @@ impl Typechecker {
     }
 
     fn ty_self_referential_check(&self, curr: TypeId, parent: IdentId) -> TypeResult<()> {
-        match self.get_ty(curr) {
+        match self.get_type(curr) {
             Type::Void | Type::Bool | Type::Integer | Type::Float => Ok(()),
             Type::Generic(_) => Ok(()),
             Type::Unknown(_) => Ok(()),
@@ -1126,48 +987,30 @@ impl Typechecker {
     }
 }
 
-pub fn typecheck(ast: &mut Ast) -> Typechecker {
+pub fn typecheck(ast: &mut Ast) -> (Typechecker, Environment) {
     let mut tc = Typechecker::default();
+    let mut env = Environment::default();
 
     // first pass: gather userdefs names and arguments only
     for stmt in &ast.global_stmts {
-        match tc.first_pass(ast, *stmt) {
-            Ok(_) => {}
-            Err(e) => tc.report_error(ast, e),
+        if let Err(e) = tc.first_pass(&mut env, ast, *stmt) {
+            tc.report_error(e);
         }
     }
 
     // second pass: gather top level symbols (struct fields and function signatures)
     for stmt in &ast.global_stmts {
-        match tc.second_pass(ast, *stmt) {
-            Ok(_) => {}
-            Err(e) => tc.report_error(ast, e),
+        if let Err(e) = tc.second_pass(&mut env, ast, *stmt) {
+            tc.report_error(e);
         }
     }
 
-    // third pass, global variables and scan funtion bodies
+    // third pass, global variables and scan function bodies
     for stmt in &ast.global_stmts {
-        match tc.typecheck(ast, *stmt) {
-            Ok(_) => {}
-            Err(e) => tc.report_error(ast, e),
+        if let Err(e) = tc.typecheck(&mut env, ast, *stmt) {
+            tc.report_error(e);
         }
     }
 
-    if !tc.errors.is_empty() {
-        return tc;
-    }
-
-    // final pass to assign final types to variables declarations
-    // for (stmt_id, ty_id) in &tc.vars_typed {
-    //     let annot = type_to_annotation(*ty_id, &tc, ast);
-    //     let (stmt, _) = ast.get_stmt_mut(*stmt_id);
-    //     match stmt {
-    //         Stmt::VarDecl(content) => {
-    //             content.ty = Some(annot);
-    //         }
-    //         _ => unreachable!(),
-    //     }
-    // }
-
-    tc
+    (tc, env)
 }
