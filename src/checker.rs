@@ -13,7 +13,6 @@ use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Default)]
 pub struct TypeId(pub Id);
-type Scope = HashMap<IdentId, TypeId>;
 struct Environment {
     vars: Vec<HashMap<IdentId, TypeId>>,
     types: Vec<HashSet<TypeId>>,
@@ -138,10 +137,10 @@ const HOLE_ID: TypeId = TypeId(4);
 
 const PRIMITIVES: &[(Type, TypeId)] = &[
     (Type::Void, VOID_ID),
+    // (Type::Hole, HOLE_ID),
     (Type::Bool, BOOL_ID),
     (Type::Integer, INT_ID),
     (Type::Float, FLOAT_ID),
-    // (Type::Hole, HOLE_ID),
 ];
 
 // TODO: better errors...
@@ -171,6 +170,7 @@ pub enum TypeErrorKind {
     UndeclaredType,
     ArgumentsInGenericParameter,
     BlockWithoutReturnExpr,
+    SelfReferentialStruct,
 }
 
 type TypeError = Spanned<TypeErrorKind>;
@@ -183,8 +183,8 @@ type TypeResult<T> = Result<T, TypeError>;
 // TODO: temporary solution
 // Basically a simple Union-find, not optimized
 #[derive(Default)]
-struct Substs(Vec<Option<TypeId>>);
-impl Substs {
+struct Unification(Vec<Option<TypeId>>);
+impl Unification {
     pub fn fresh(&mut self) -> u32 {
         let id = self.0.len() as u32;
         self.0.push(None);
@@ -199,7 +199,7 @@ pub struct Typechecker {
     pub funcs: HashMap<IdentId, FuncInfo>,
     pub structs: HashMap<IdentId, StructInfo>,
 
-    substs: Substs,
+    substs: Unification,
 
     vars_typed: Vec<(StmtId, TypeId)>, // TODO: temporary solution, find fix
     pub errors: Vec<TypeError>,
@@ -325,7 +325,8 @@ impl Typechecker {
                     "int" => return Ok(INT_ID),
                     "float" => return Ok(FLOAT_ID),
                     _ => {
-                        // it is either a primitive or generic parameter
+                        // it is either a userdef or generic parameter
+                        // TODO: this should be scoped, do a type lookup
                         if let Some(struct_info) = self.structs.get(name) {
                             if struct_info.generics.len() != args.len() {
                                 Err(tyerr(TypeErrorKind::WrongTypeArgumentsCount, span))?
@@ -546,6 +547,8 @@ impl Typechecker {
                     let mut fields = Vec::new();
                     for field in &content.fields {
                         let ty_id = tc.add_type_from_annotation(ast, field.1)?;
+                        tc.ty_self_referential_check(ty_id, content.name)?;
+
                         fields.push((field.0, ty_id));
                     }
 
@@ -899,18 +902,17 @@ impl Typechecker {
         let ty_b = self.get_ty(ty_id_b).clone();
 
         match (ty_a, ty_b) {
-            (Type::Unknown(x), Type::Unknown(y)) => {
-                if x != y {
-                    return Err(tyerr(
-                        TypeErrorKind::TypeMismatch {
-                            a: self.get_ty(ty_id_a).clone(),
-                            b: self.get_ty(ty_id_b).clone(),
-                        },
-                        span,
-                    ));
-                }
-            }
-
+            // (Type::Unknown(x), Type::Unknown(y)) => {
+            //     if x != y {
+            //         return Err(tyerr(
+            //             TypeErrorKind::TypeMismatch {
+            //                 a: self.get_ty(ty_id_a).clone(),
+            //                 b: self.get_ty(ty_id_b).clone(),
+            //             },
+            //             span,
+            //         ));
+            //     }
+            // }
             (Type::Unknown(x), _) => {
                 if self.ty_occurs_check(ty_id_b, x) {
                     return Err(tyerr(
@@ -1084,12 +1086,42 @@ impl Typechecker {
         match self.get_ty(ty) {
             Type::Void | Type::Bool | Type::Integer | Type::Float => false,
             Type::Generic(_) => false,
-            Type::Func { params, ret, .. } => {
+            Type::Func { params, ret } => {
                 params.iter().any(|p| self.ty_occurs_check(*p, ty_var))
                     || self.ty_occurs_check(*ret, ty_var)
             }
             Type::UserDef { args, .. } => args.iter().any(|a| self.ty_occurs_check(*a, ty_var)),
             Type::Unknown(inner_ty_var) => *inner_ty_var == ty_var,
+        }
+    }
+
+    fn ty_self_referential_check(&self, curr: TypeId, parent: IdentId) -> TypeResult<()> {
+        match self.get_ty(curr) {
+            Type::Void | Type::Bool | Type::Integer | Type::Float => Ok(()),
+            Type::Generic(_) => Ok(()),
+            Type::Unknown(_) => Ok(()),
+
+            Type::Func { params, ret } => {
+                for param in params {
+                    self.ty_self_referential_check(*param, parent)?;
+                }
+
+                self.ty_self_referential_check(*ret, parent)
+            }
+            Type::UserDef { args, name } => {
+                if *name == parent {
+                    return Err(tyerr(
+                        TypeErrorKind::SelfReferentialStruct,
+                        &Span { start: 0, end: 0 },
+                    ));
+                }
+
+                for arg in args {
+                    self.ty_self_referential_check(*arg, parent)?;
+                }
+
+                Ok(())
+            }
         }
     }
 }
