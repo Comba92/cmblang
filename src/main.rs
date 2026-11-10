@@ -17,7 +17,7 @@ fn main() {
     }
 
     let mut ast = Ast::new(lex, parser);
-    let (checker, env) = typecheck(&mut ast);
+    let checker = typecheck(&mut ast);
 
     for err in &checker.errors {
         out += &render_err(&ast.lex, &err.0, err.1, ErrSource::Checker);

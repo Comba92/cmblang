@@ -119,32 +119,38 @@ const PRIMITIVES: &[(Type, TypeId)] = &[
 // TODO: better errors...
 #[derive(Debug)]
 pub enum TypeErrorKind {
-    UndeclaredVar,
+    UndeclaredVar(IdentId),
+    UndeclaredType(IdentId),
     WrongAnnotation { cause: Box<TypeError> },
-    TypeMismatch { a: Type, b: Type },
-    InfiniteType { source: Type, contains: Type },
+    TypeMismatch { expected: TypeId, actual: TypeId },
+    InfiniteType { source: TypeId, contains: TypeId },
     RequiredAnnotation,
 
     InvalidStmtInGlobal,
     InvalidStmtInBlock,
 
-    WrongCallArgumentsCount,
-    WrongStructLiteralCount,
-    WrongTypeArgumentsCount,
-    WrongStructLiteralField,
-    DuplicateParamsInFunction,
-    DuplicateGenericsInFunction,
-    DuplicateFieldsInStruct,
-    DuplicateGenericsInStruct,
+    WrongCallArgumentsCount { expected: usize, actual: usize },
 
-    CallingWithWrongType,
+    WrongTypeArgumentsCount { expected: usize, actual: usize },
+
+    WrongStructLiteralCount { expected: usize, actual: usize },
+    WrongStructLiteralField(IdentId),
+
+    DuplicateParamsInFunction(IdentId),
+    DuplicateGenericsInFunction(IdentId),
+    DuplicateFieldsInStruct(IdentId),
+    DuplicateGenericsInStruct(IdentId),
+
+    CallingWithWrongType(TypeId),
     IndexingWithWrongType,
+
     ValueNotAssignable,
-    UndeclaredType,
     ArgumentsInGenericParameter,
-    BlockWithoutReturnExpr,
-    SelfReferentialStruct,
+    BlockWithoutReturnExpr(Option<TypeId>),
+
+    SelfReferentialStruct(IdentId),
 }
+impl TypeErrorKind {}
 
 type TypeError = Spanned<TypeErrorKind>;
 pub fn tyerr(kind: TypeErrorKind, span: &Span) -> TypeError {
@@ -296,7 +302,13 @@ impl Typechecker {
                         // TODO: this should be scoped, do a type lookup
                         if let Some(struct_info) = self.structs.get(name) {
                             if struct_info.generics.len() != args.len() {
-                                Err(tyerr(TypeErrorKind::WrongTypeArgumentsCount, span))?
+                                Err(tyerr(
+                                    TypeErrorKind::WrongTypeArgumentsCount {
+                                        expected: struct_info.generics.len(),
+                                        actual: args.len(),
+                                    },
+                                    span,
+                                ))?
                             }
 
                             let mut list = Vec::new();
@@ -314,7 +326,7 @@ impl Typechecker {
                             if let Some(id) = self.lookup_ty(env, &Type::Generic(*name)) {
                                 return Ok(id);
                             } else {
-                                Err(tyerr(TypeErrorKind::UndeclaredType, span))?
+                                Err(tyerr(TypeErrorKind::UndeclaredType(*name), span))?
                             }
                         }
                     }
@@ -389,7 +401,10 @@ impl Typechecker {
         match stmt {
             Stmt::StructDecl(content) => {
                 if has_duplicates(&content.generics, |g| *g) {
-                    return Err(tyerr(TypeErrorKind::DuplicateGenericsInStruct, span));
+                    return Err(tyerr(
+                        TypeErrorKind::DuplicateGenericsInStruct(content.name),
+                        span,
+                    ));
                 }
 
                 // TODO: what if we have colliding names?
@@ -417,11 +432,17 @@ impl Typechecker {
 
                 // TODO: should we check if generic names collides with primitive name?
                 if has_duplicates(&content.generics, |g| *g) {
-                    return Err(tyerr(TypeErrorKind::DuplicateGenericsInFunction, span));
+                    return Err(tyerr(
+                        TypeErrorKind::DuplicateGenericsInFunction(content.name),
+                        span,
+                    ));
                 }
 
                 if has_duplicates(&content.params, |p| p.0) {
-                    return Err(tyerr(TypeErrorKind::DuplicateParamsInFunction, span));
+                    return Err(tyerr(
+                        TypeErrorKind::DuplicateParamsInFunction(content.name),
+                        span,
+                    ));
                 }
 
                 let (params, ret) = env.with_ty_scope(|env| -> TypeResult<_> {
@@ -465,7 +486,10 @@ impl Typechecker {
 
             Stmt::StructDecl(content) => {
                 if has_duplicates(&content.fields, |f| f.0) {
-                    return Err(tyerr(TypeErrorKind::DuplicateFieldsInStruct, span));
+                    return Err(tyerr(
+                        TypeErrorKind::DuplicateFieldsInStruct(content.name),
+                        span,
+                    ));
                 }
 
                 let fields = env.with_ty_scope(|env| -> TypeResult<_> {
@@ -487,7 +511,7 @@ impl Typechecker {
                 let info = self
                     .structs
                     .get_mut(&content.name)
-                    .ok_or_else(|| tyerr(TypeErrorKind::UndeclaredType, span))?;
+                    .ok_or_else(|| tyerr(TypeErrorKind::UndeclaredType(content.name), span))?;
 
                 info.fields = fields?.into();
             }
@@ -506,7 +530,7 @@ impl Typechecker {
                 let info = self
                     .funcs
                     .get(&content.name)
-                    .ok_or_else(|| tyerr(TypeErrorKind::UndeclaredVar, span))?;
+                    .ok_or_else(|| tyerr(TypeErrorKind::UndeclaredVar(content.name), span))?;
 
                 let ret_expected = info.ret;
                 let params = info.params.clone();
@@ -534,6 +558,7 @@ impl Typechecker {
         Ok(())
     }
 
+    // TODO: this fails IMMEDIATELY, add statement level granularity for errors
     fn infer_block(
         &mut self,
         env: &mut Environment,
@@ -590,7 +615,7 @@ impl Typechecker {
                     }
                 },
 
-                _ => return Err(tyerr(TypeErrorKind::BlockWithoutReturnExpr, span)),
+                _ => return Err(tyerr(TypeErrorKind::BlockWithoutReturnExpr(ret_ty), span)),
             }
         }
 
@@ -612,7 +637,7 @@ impl Typechecker {
             Expr::Variable(name) => {
                 let ty = env
                     .lookup_var(*name)
-                    .ok_or_else(|| tyerr(TypeErrorKind::UndeclaredVar, span))?;
+                    .ok_or_else(|| tyerr(TypeErrorKind::UndeclaredVar(*name), span))?;
 
                 match self.get_type(ty) {
                     // if we're getting a generic from a variable, we are inside a function declaration. WE DON'T HAVE to instantiate it
@@ -674,21 +699,33 @@ impl Typechecker {
                         }
 
                         if params.len() != args.len() {
-                            return Err(tyerr(TypeErrorKind::WrongCallArgumentsCount, span));
+                            return Err(tyerr(
+                                TypeErrorKind::WrongCallArgumentsCount {
+                                    expected: params.len(),
+                                    actual: args.len(),
+                                },
+                                span,
+                            ));
                         }
 
                         // return value might be a type variable, we have to normalize and get the potential solved type
                         ret
                     }
 
-                    _ => Err(tyerr(TypeErrorKind::CallingWithWrongType, span))?,
+                    _ => Err(tyerr(TypeErrorKind::CallingWithWrongType(ty_id), span))?,
                 }
             }
 
             Expr::StructLiteral(name, args) => {
                 if let Some(info) = self.structs.get(name).cloned() {
                     if info.fields.len() != args.len() {
-                        return Err(tyerr(TypeErrorKind::WrongStructLiteralCount, span));
+                        return Err(tyerr(
+                            TypeErrorKind::WrongStructLiteralCount {
+                                expected: info.fields.len(),
+                                actual: args.len(),
+                            },
+                            span,
+                        ));
                     }
 
                     let mut generics = Vec::new();
@@ -696,7 +733,10 @@ impl Typechecker {
                         info.fields.iter().zip(args.iter())
                     {
                         if field_name != value_name {
-                            return Err(tyerr(TypeErrorKind::WrongStructLiteralField, span));
+                            return Err(tyerr(
+                                TypeErrorKind::WrongStructLiteralField(*value_name),
+                                span,
+                            ));
                         }
 
                         match self.get_type(*field_ty) {
@@ -716,7 +756,7 @@ impl Typechecker {
                         },
                     )
                 } else {
-                    Err(tyerr(TypeErrorKind::UndeclaredType, span))?
+                    Err(tyerr(TypeErrorKind::UndeclaredType(*name), span))?
                 }
             }
 
@@ -734,6 +774,7 @@ impl Typechecker {
         Ok(id)
     }
 
+    // TODO: might need to add an erorr variant util so we know which kind of type mismatch wege vot
     fn check(
         &mut self,
         env: &mut Environment,
@@ -768,8 +809,8 @@ impl Typechecker {
                 if self.ty_occurs_check(ty_id_b, x) {
                     return Err(tyerr(
                         TypeErrorKind::InfiniteType {
-                            source: self.get_type(ty_id_b).clone(),
-                            contains: self.get_type(ty_id_a).clone(),
+                            source: ty_id_b,
+                            contains: ty_id_a,
                         },
                         span,
                     ));
@@ -781,8 +822,8 @@ impl Typechecker {
                 if self.ty_occurs_check(ty_id_a, x) {
                     return Err(tyerr(
                         TypeErrorKind::InfiniteType {
-                            source: self.get_type(ty_id_a).clone(),
-                            contains: self.get_type(ty_id_b).clone(),
+                            source: ty_id_a,
+                            contains: ty_id_b,
                         },
                         span,
                     ));
@@ -800,8 +841,8 @@ impl Typechecker {
                 if x != y {
                     return Err(tyerr(
                         TypeErrorKind::TypeMismatch {
-                            a: self.get_type(ty_id_a).clone(),
-                            b: self.get_type(ty_id_b).clone(),
+                            expected: ty_id_a,
+                            actual: ty_id_b,
                         },
                         span,
                     ));
@@ -842,8 +883,8 @@ impl Typechecker {
                 if name_l != name_r {
                     return Err(tyerr(
                         TypeErrorKind::TypeMismatch {
-                            a: self.get_type(ty_id_a).clone(),
-                            b: self.get_type(ty_id_b).clone(),
+                            expected: ty_id_a,
+                            actual: ty_id_b,
                         },
                         span,
                     ));
@@ -857,8 +898,8 @@ impl Typechecker {
             _ => {
                 return Err(tyerr(
                     TypeErrorKind::TypeMismatch {
-                        a: self.get_type(ty_id_a).clone(),
-                        b: self.get_type(ty_id_b).clone(),
+                        expected: ty_id_a,
+                        actual: ty_id_b,
                     },
                     span,
                 ));
@@ -972,8 +1013,8 @@ impl Typechecker {
             Type::UserDef { args, name } => {
                 if *name == parent {
                     return Err(tyerr(
-                        TypeErrorKind::SelfReferentialStruct,
-                        &Span { start: 0, end: 0 },
+                        TypeErrorKind::SelfReferentialStruct(parent),
+                        &Span { start: 0, end: 0 }, // TODO: no span here
                     ));
                 }
 
@@ -987,7 +1028,7 @@ impl Typechecker {
     }
 }
 
-pub fn typecheck(ast: &mut Ast) -> (Typechecker, Environment) {
+pub fn typecheck(ast: &mut Ast) -> Typechecker {
     let mut tc = Typechecker::default();
     let mut env = Environment::default();
 
@@ -1012,5 +1053,23 @@ pub fn typecheck(ast: &mut Ast) -> (Typechecker, Environment) {
         }
     }
 
-    (tc, env)
+    // TODO: should check for any unresolved variable?
+
+    if !tc.errors.is_empty() {
+        return tc;
+    }
+
+    // final pass to assign final types to variables declarations
+    for (stmt_id, ty_id) in &tc.vars_typed {
+        let annot = type_to_annotation(*ty_id, &tc, ast);
+        let (stmt, _) = ast.get_stmt_mut(*stmt_id);
+        match stmt {
+            Stmt::VarDecl(content) => {
+                content.ty = Some(annot);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    tc
 }
