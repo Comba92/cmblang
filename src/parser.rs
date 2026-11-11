@@ -55,6 +55,8 @@ pub enum Expr {
         second: ExprId,
     },
 
+    // TODO: still not sure about keeping IfElse and Loops as expressions
+    // especially loops
     IfElse {
         cond: ExprId,
         first: ExprId,
@@ -79,6 +81,11 @@ pub enum Expr {
     },
 
     Block(Block),
+}
+impl Expr {
+    pub fn is_block_expr(&self) -> bool {
+        matches!(self, Expr::IfElse { .. } | Expr::Block(_))
+    }
 }
 
 #[derive(Debug)]
@@ -693,18 +700,18 @@ impl Parser {
             TokenKind::Let => self.parse_var_decl(c, start)?,
 
             TokenKind::Return => {
-                let expr = self.parse_expr(c, 0)?;
-                let ret = self.add_expr(Expr::Return(expr), c, start);
-                self.add_stmt(Stmt::Expr(ret), c, start)
+                if c.peek().kind == TokenKind::Semicolon {
+                    todo!("empty return");
+                } else {
+                    let expr = self.parse_expr(c, 0)?;
+                    let ret = self.add_expr(Expr::Return(expr), c, start);
+                    self.add_stmt(Stmt::Expr(ret), c, start)
+                }
             }
 
-            TokenKind::Continue => {
-              self.add_stmt(Stmt::Continue, c, start)
-            }
+            TokenKind::Continue => self.add_stmt(Stmt::Continue, c, start),
 
-            TokenKind::Break => {
-              self.add_stmt(Stmt::Break, c, start)
-            }
+            TokenKind::Break => self.add_stmt(Stmt::Break, c, start),
 
             TokenKind::Fn => {
                 let name_tok = c.expect(TokenKind::Ident, FNDECL_ANCHORS, || "fn token")?;

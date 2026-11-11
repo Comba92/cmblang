@@ -80,6 +80,7 @@ impl Environment {
 #[derive(Debug, Clone, Hash)]
 pub enum Type {
     Void,
+    // Never,
     Integer,
     Float,
     Bool,
@@ -146,8 +147,8 @@ pub enum TypeErrorKind {
 
     ValueNotAssignable,
     ArgumentsInGenericParameter,
-    BlockWithoutReturnExpr(Option<TypeId>),
     InvalidControlStmtInBlock,
+    NoReturnInFunctionBlock,
 
     SelfReferentialStruct(IdentId),
 }
@@ -180,6 +181,7 @@ pub struct Typechecker {
     substs: Unification,
 
     loop_depth: u32,
+    func_ret: Option<TypeId>,
 
     vars_typed: Vec<(StmtId, TypeId)>, // TODO: temporary solution, find fix
     pub errors: Vec<TypeError>,
@@ -200,7 +202,9 @@ impl Default for Typechecker {
             structs: Default::default(),
 
             substs: Default::default(),
+
             loop_depth: 0,
+            func_ret: None,
 
             vars_typed: vec![],
             errors: vec![],
@@ -537,33 +541,35 @@ impl Typechecker {
                     .ok_or_else(|| tyerr(TypeErrorKind::UndeclaredVar(content.name), span))?;
 
                 let ret_expected = info.ret;
+                self.func_ret = Some(ret_expected);
+
                 let params = info.params.clone();
-
                 let generics = info.generics.clone();
-                let ret_actual = env.with_ty_scope(|env| env.with_var_scope(|env| {
-                    for generic in generics {
-                        self.add_type(env, Type::Generic(generic));
-                    }
+                let ret_actual = env.with_ty_scope(|env| {
+                    env.with_var_scope(|env| {
+                        for generic in generics {
+                            self.add_type(env, Type::Generic(generic));
+                        }
 
-                    for (param_ty, param_content) in params.iter().zip(content.params.iter()) {
-                        env.bind_var(param_content.0, *param_ty);
-                    }
+                        for (param_ty, param_content) in params.iter().zip(content.params.iter()) {
+                            env.bind_var(param_content.0, *param_ty);
+                        }
 
-                    self.infer_block(env, ast, &content.code)
-                }));
+                        self.infer_block(env, ast, &content.code)
+                    })
+                });
 
-                let ret_actual = ret_actual?;
-                self.unify(env, ret_actual, ret_expected, span)?;
+                self.func_ret = None;
+                ret_actual?;
+                // self.unify(env, ret_actual, ret_expected, span)?;
             }
 
             Stmt::StructDecl(_) => {} // Do nothing, already done in top level pass
             Stmt::Continue | Stmt::Break => {
-              Err(tyerr(TypeErrorKind::InvalidControlStmtInBlock, span))?
+                Err(tyerr(TypeErrorKind::InvalidControlStmtInBlock, span))?
             }
 
-            Stmt::Expr(_) => {
-                Err(tyerr(TypeErrorKind::InvalidStmtInGlobal, span))?
-            }
+            Stmt::Expr(_) => Err(tyerr(TypeErrorKind::InvalidStmtInGlobal, span))?,
         }
 
         Ok(())
@@ -576,8 +582,6 @@ impl Typechecker {
         ast: &Ast,
         block: &Block,
     ) -> TypeResult<TypeId> {
-        let mut ret_ty = None;
-
         // iter over all except the last
         // this is important because otherwise we would add two different type variables for the last expression and incurr in a type error
         for stmt_id in block.list.iter().rev().skip(1).rev().copied() {
@@ -589,14 +593,14 @@ impl Typechecker {
                     let (expr, _) = ast.get_expr(*expr_id);
 
                     match expr {
-                        Expr::Return(expr_id) => match ret_ty {
+                        Expr::Return(expr_id) => match &self.func_ret {
                             None => {
-                                // we found the first return epxr.
-                                ret_ty = Some(self.infer(env, ast, *expr_id)?);
+                                // this block isn't inside a function but is doing a return
+                                return Err(tyerr(TypeErrorKind::InvalidControlStmtInBlock, span));
                             }
-                            Some(found_ret_ty) => {
-                                // all other return statements should have the same type as the first.
-                                self.check(env, ast, *expr_id, found_ret_ty)?;
+                            Some(current_func_ret) => {
+                                // all return statements should have the same type as the function's.
+                                self.check(env, ast, *expr_id, *current_func_ret)?;
                             }
                         },
 
@@ -604,33 +608,45 @@ impl Typechecker {
                     }
                 }
 
-                Stmt::Break | Stmt::Continue => if self.loop_depth == 0 {
-                  Err(tyerr(TypeErrorKind::InvalidControlStmtInBlock, span))?
+                Stmt::Break | Stmt::Continue => {
+                    if self.loop_depth == 0 {
+                        Err(tyerr(TypeErrorKind::InvalidControlStmtInBlock, span))?
+                    }
                 }
 
                 Stmt::FuncDecl(_) | Stmt::StructDecl(_) => {
-                    let err = tyerr(TypeErrorKind::InvalidStmtInBlock, span);
-                    Err(err)?
+                    Err(tyerr(TypeErrorKind::InvalidStmtInBlock, span))?
                 }
             };
         }
 
         // check last expression
         // if block has no elements, its just void
+
+        let mut ret_ty = None;
         if let Some(last) = block.list.last() {
             let (stmt, span) = ast.get_stmt(*last);
 
             match stmt {
-                Stmt::Expr(expr) => match ret_ty {
-                    None => {
-                        ret_ty = Some(self.infer(env, ast, *expr)?);
+                Stmt::Expr(expr_id) => match &self.func_ret {
+                    Some(current_func_ret) => {
+                        // we dont care if return type is void
+                        if *current_func_ret != VOID_ID {
+                            self.check(env, ast, *expr_id, *current_func_ret)?;
+                        }
                     }
-                    Some(found_ret_ty) => {
-                        self.check(env, ast, *expr, found_ret_ty)?;
-                    }
+                    None => ret_ty = Some(self.infer(env, ast, *expr_id)?),
                 },
 
-                _ => return Err(tyerr(TypeErrorKind::BlockWithoutReturnExpr(ret_ty), span)),
+                // this block is inside a function and it hasn't got a final return
+                _ => {
+                    if let Some(current_func_ret) = &self.func_ret {
+                        // we dont care if return type is void
+                        if *current_func_ret != VOID_ID {
+                            return Err(tyerr(TypeErrorKind::NoReturnInFunctionBlock, span));
+                        }
+                    }
+                }
             }
         }
 
@@ -687,18 +703,21 @@ impl Typechecker {
                 second,
             } => {
                 self.check(env, ast, *cond, BOOL_ID)?;
-                let first_ty = self.infer(env, ast, *first)?;
-                if let Some(second) = second {
-                    self.check(env, ast, *second, first_ty)?;
-                }
 
-                first_ty
+                if let Some(second) = second {
+                    let first_ty = self.infer(env, ast, *first)?;
+                    self.check(env, ast, *second, first_ty)?;
+                    first_ty
+                } else {
+                    self.check(env, ast, *first, VOID_ID)?;
+                    VOID_ID
+                }
             }
 
             Expr::While { cond, code } => {
                 self.check(env, ast, *cond, BOOL_ID)?;
                 self.loop_depth += 1;
-                let res = self.infer(env, ast, *code);
+                let res = self.check(env, ast, *code, VOID_ID);
                 self.loop_depth -= 1;
                 res?;
                 VOID_ID
@@ -1078,6 +1097,7 @@ pub fn typecheck(ast: &mut Ast) -> Typechecker {
     }
 
     // final pass to assign final types to variables declarations
+    // (zonking)
     for (stmt_id, ty_id) in &tc.vars_typed {
         let annot = type_to_annotation(*ty_id, &tc, ast);
         let (stmt, _) = ast.get_stmt_mut(*stmt_id);
