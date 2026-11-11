@@ -35,7 +35,6 @@ impl Default for Environment {
 }
 
 impl Environment {
-    // ---- variables ----
     fn lookup_var(&self, name: IdentId) -> Option<TypeId> {
         for scope in self.vars_scopes.iter().rev() {
             if let Some(ty) = scope.get(&name) {
@@ -58,10 +57,6 @@ impl Environment {
         self.ty_scopes.iter().rev().any(|scope| scope.contains(&ty))
     }
 
-    // ---- scopes ----
-    // push/pop are only reachable through these, so they can't get unbalanced.
-    // the callback receives the environment back, since the caller's closure
-    // can't capture it while we hold &mut self.
     fn with_var_scope<T>(&mut self, f: impl FnOnce(&mut Environment) -> T) -> T {
         self.vars_scopes.push(HashMap::new());
         let res = f(self);
@@ -81,7 +76,7 @@ impl Environment {
 pub enum Type {
     Void,
     // Never,
-    Integer,
+    Int,
     Float,
     Bool,
     Generic(IdentId),
@@ -113,7 +108,7 @@ const HOLE_ID: TypeId = TypeId(4);
 const PRIMITIVES: &[(Type, TypeId)] = &[
     (Type::Void, VOID_ID),
     (Type::Bool, BOOL_ID),
-    (Type::Integer, INT_ID),
+    (Type::Int, INT_ID),
     (Type::Float, FLOAT_ID),
 ];
 
@@ -149,6 +144,7 @@ pub enum TypeErrorKind {
     ArgumentsInGenericParameter,
     InvalidControlStmtInBlock,
     NoReturnInFunctionBlock,
+    InvalidLastStmtInBlock,
 
     SelfReferentialStruct(IdentId),
 }
@@ -219,7 +215,7 @@ fn type_to_annotation(ty_id: TypeId, tc: &Typechecker, ast: &mut Ast) -> TyAnnot
             args: Default::default(),
         },
 
-        Type::Integer | Type::Bool => TyAnnot::Type {
+        Type::Int | Type::Bool => TyAnnot::Type {
             // we treat bools as ints in C
             name: IdentId(ast.idents.add("int")),
             args: Default::default(),
@@ -633,18 +629,59 @@ impl Typechecker {
                         // we dont care if return type is void
                         if *current_func_ret != VOID_ID {
                             self.check(env, ast, *expr_id, *current_func_ret)?;
+                        } else {
+                            self.infer(env, ast, *expr_id)?;
                         }
                     }
                     None => ret_ty = Some(self.infer(env, ast, *expr_id)?),
                 },
 
-                // this block is inside a function and it hasn't got a final return
                 _ => {
                     if let Some(current_func_ret) = &self.func_ret {
                         // we dont care if return type is void
                         if *current_func_ret != VOID_ID {
                             return Err(tyerr(TypeErrorKind::NoReturnInFunctionBlock, span));
+                        } else {
+                            match stmt {
+                                Stmt::VarDecl(content) => {
+                                    self.var_decl(env, ast, content, *last, span)?
+                                }
+
+                                Stmt::Expr(expr_id) => {
+                                    let (expr, _) = ast.get_expr(*expr_id);
+
+                                    match expr {
+                                        Expr::Return(expr_id) => match &self.func_ret {
+                                            None => {
+                                                // this block isn't inside a function but is doing a return
+                                                return Err(tyerr(
+                                                    TypeErrorKind::InvalidControlStmtInBlock,
+                                                    span,
+                                                ));
+                                            }
+                                            Some(current_func_ret) => {
+                                                // all return statements should have the same type as the function's.
+                                                self.check(env, ast, *expr_id, *current_func_ret)?;
+                                            }
+                                        },
+
+                                        _ => _ = self.infer(env, ast, *expr_id)?,
+                                    }
+                                }
+
+                                Stmt::Break | Stmt::Continue => {
+                                    if self.loop_depth == 0 {
+                                        Err(tyerr(TypeErrorKind::InvalidControlStmtInBlock, span))?
+                                    }
+                                }
+
+                                Stmt::FuncDecl(_) | Stmt::StructDecl(_) => {
+                                    Err(tyerr(TypeErrorKind::InvalidStmtInBlock, span))?
+                                }
+                            };
                         }
+                    } else {
+                        return Err(tyerr(TypeErrorKind::InvalidLastStmtInBlock, span));
                     }
                 }
             }
@@ -657,6 +694,7 @@ impl Typechecker {
     fn infer(&mut self, env: &mut Environment, ast: &Ast, expr: ExprId) -> TypeResult<TypeId> {
         let (expr, span) = ast.get_expr(expr);
         let id = match expr {
+            Expr::Empty => VOID_ID,
             Expr::BoolLiteral(_) => BOOL_ID,
             Expr::IntLiteral(_) => INT_ID,
             Expr::FloatLiteral(_) => FLOAT_ID,
@@ -703,13 +741,15 @@ impl Typechecker {
                 second,
             } => {
                 self.check(env, ast, *cond, BOOL_ID)?;
+                println!("we are inside an if: {first:?} {second:?}");
 
                 if let Some(second) = second {
                     let first_ty = self.infer(env, ast, *first)?;
                     self.check(env, ast, *second, first_ty)?;
                     first_ty
                 } else {
-                    self.check(env, ast, *first, VOID_ID)?;
+                    let res = self.check(env, ast, *first, VOID_ID)?;
+                    println!("if: {:?}", self.get_type(res));
                     VOID_ID
                 }
             }
@@ -781,7 +821,9 @@ impl Typechecker {
                                 let value_ty = self.infer(env, ast, *value)?;
                                 generics.push(value_ty);
                             }
-                            _ => self.check(env, ast, *value, *field_ty)?,
+                            _ => {
+                                self.check(env, ast, *value, *field_ty)?;
+                            }
                         };
                     }
 
@@ -818,13 +860,13 @@ impl Typechecker {
         ast: &Ast,
         expr_id: ExprId,
         expected_ty: TypeId,
-    ) -> TypeResult<()> {
+    ) -> TypeResult<TypeId> {
         let (_, span) = ast.get_expr(expr_id);
 
         let inferred_ty = self.infer(env, ast, expr_id)?;
         self.unify(env, expected_ty, inferred_ty, span)?;
 
-        Ok(())
+        Ok(inferred_ty)
     }
 
     fn unify(
@@ -870,7 +912,7 @@ impl Typechecker {
             }
 
             (Type::Void, Type::Void)
-            | (Type::Integer, Type::Integer)
+            | (Type::Int, Type::Int)
             | (Type::Bool, Type::Bool)
             | (Type::Float, Type::Float) => {}
 
@@ -1023,7 +1065,7 @@ impl Typechecker {
     // check for self-referencing type variables
     fn ty_occurs_check(&self, ty: TypeId, ty_var: u32) -> bool {
         match self.get_type(ty) {
-            Type::Void | Type::Bool | Type::Integer | Type::Float => false,
+            Type::Void | Type::Bool | Type::Int | Type::Float => false,
             Type::Generic(_) => false,
             Type::Func { params, ret } => {
                 params.iter().any(|p| self.ty_occurs_check(*p, ty_var))
@@ -1036,7 +1078,7 @@ impl Typechecker {
 
     fn ty_self_referential_check(&self, curr: TypeId, parent: IdentId) -> TypeResult<()> {
         match self.get_type(curr) {
-            Type::Void | Type::Bool | Type::Integer | Type::Float => Ok(()),
+            Type::Void | Type::Bool | Type::Int | Type::Float => Ok(()),
             Type::Generic(_) => Ok(()),
             Type::Unknown(_) => Ok(()),
 

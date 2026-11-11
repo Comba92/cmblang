@@ -28,6 +28,7 @@ pub struct Block {
 // TODO: expressions are not added in order. no way to do superflat opt right now
 #[derive(Debug, Clone)]
 pub enum Expr {
+    Empty,
     IntLiteral(u32),
     FloatLiteral(f32),
     BoolLiteral(bool),
@@ -700,13 +701,14 @@ impl Parser {
             TokenKind::Let => self.parse_var_decl(c, start)?,
 
             TokenKind::Return => {
-                if c.peek().kind == TokenKind::Semicolon {
-                    todo!("empty return");
+                let expr = if c.peek().kind == TokenKind::Semicolon {
+                    self.add_expr(Expr::Empty, c, start)
                 } else {
-                    let expr = self.parse_expr(c, 0)?;
-                    let ret = self.add_expr(Expr::Return(expr), c, start);
-                    self.add_stmt(Stmt::Expr(ret), c, start)
-                }
+                    self.parse_expr(c, 0)?
+                };
+
+                let ret = self.add_expr(Expr::Return(expr), c, start);
+                self.add_stmt(Stmt::Expr(ret), c, start)
             }
 
             TokenKind::Continue => self.add_stmt(Stmt::Continue, c, start),

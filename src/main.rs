@@ -24,8 +24,6 @@ fn main() {
         out += "\n";
     }
 
-    println!("{:?}", checker.types);
-
     io::stdout().lock().write_all(out.as_bytes()).unwrap();
     //     println!("{:?}", checker.types);
     //     println!("{:?}", checker.funcs);
