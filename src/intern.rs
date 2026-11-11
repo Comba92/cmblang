@@ -71,4 +71,11 @@ impl<T: hash::Hash> Interner<T> {
     pub fn get(&self, id: u32) -> &T {
         &self.id_to_value[id as usize]
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = (u32, &T)> {
+        self.id_to_value
+            .iter()
+            .enumerate()
+            .map(|(i, x)| (i as u32, x))
+    }
 }

@@ -76,6 +76,7 @@ impl Environment {
 pub enum Type {
     Void,
     // Never,
+    // Hole
     Int,
     Float,
     Bool,
@@ -172,6 +173,9 @@ impl Unification {
 pub struct Typechecker {
     pub funcs: HashMap<IdentId, FuncInfo>,
     pub structs: HashMap<IdentId, StructInfo>,
+
+    pub funcs_instances: HashSet<TypeId>,
+    pub structs_instances: HashSet<TypeId>,
     pub types: Interner<Type>,
 
     substs: Unification,
@@ -196,6 +200,9 @@ impl Default for Typechecker {
 
             funcs: Default::default(),
             structs: Default::default(),
+
+            funcs_instances: Default::default(),
+            structs_instances: Default::default(),
 
             substs: Default::default(),
 
@@ -397,7 +404,12 @@ impl Typechecker {
         Ok(())
     }
 
-    fn first_pass(&mut self, _env: &mut Environment, ast: &Ast, stmt_id: StmtId) -> TypeResult<()> {
+    fn first_userdefs_pass(
+        &mut self,
+        _env: &mut Environment,
+        ast: &Ast,
+        stmt_id: StmtId,
+    ) -> TypeResult<()> {
         // this pass only collects the structs names and arguments
         // a struct can reference another struct which might be not yet declared
 
@@ -428,7 +440,12 @@ impl Typechecker {
         Ok(())
     }
 
-    fn second_pass(&mut self, env: &mut Environment, ast: &Ast, stmt_id: StmtId) -> TypeResult<()> {
+    fn second_decl_pass(
+        &mut self,
+        env: &mut Environment,
+        ast: &Ast,
+        stmt_id: StmtId,
+    ) -> TypeResult<()> {
         let (stmt, span) = ast.get_stmt(stmt_id);
         match stmt {
             Stmt::FuncDecl(content) => {
@@ -525,7 +542,12 @@ impl Typechecker {
         Ok(())
     }
 
-    fn typecheck(&mut self, env: &mut Environment, ast: &Ast, stmt_id: StmtId) -> TypeResult<()> {
+    fn third_global_pass(
+        &mut self,
+        env: &mut Environment,
+        ast: &Ast,
+        stmt_id: StmtId,
+    ) -> TypeResult<()> {
         let (stmt, span) = ast.get_stmt(stmt_id);
         match stmt {
             Stmt::VarDecl(content) => self.var_decl(env, ast, content, stmt_id, span)?,
@@ -741,15 +763,13 @@ impl Typechecker {
                 second,
             } => {
                 self.check(env, ast, *cond, BOOL_ID)?;
-                println!("we are inside an if: {first:?} {second:?}");
 
                 if let Some(second) = second {
                     let first_ty = self.infer(env, ast, *first)?;
                     self.check(env, ast, *second, first_ty)?;
                     first_ty
                 } else {
-                    let res = self.check(env, ast, *first, VOID_ID)?;
-                    println!("if: {:?}", self.get_type(res));
+                    self.check(env, ast, *first, VOID_ID)?;
                     VOID_ID
                 }
             }
@@ -766,10 +786,6 @@ impl Typechecker {
             Expr::Call { callee, args } => {
                 let ty_id = self.infer(env, ast, *callee)?;
                 match self.get_type(ty_id).clone() {
-                    Type::Unknown(id) => {
-                        todo!("figure this one out");
-                    }
-
                     Type::Func { params, ret } => {
                         for (param, arg) in params.iter().zip(args.iter()) {
                             self.check(env, ast, *arg, *param)?;
@@ -1105,6 +1121,19 @@ impl Typechecker {
             }
         }
     }
+
+    fn ty_is_generic(&self, ty: TypeId) -> bool {
+        match self.get_type(ty) {
+            Type::Func { params, ret } => {
+                params.iter().any(|p| self.ty_is_generic(*p)) || self.ty_is_generic(*ret)
+            }
+            Type::UserDef { args, .. } => args.iter().any(|a| self.ty_is_generic(*a)),
+
+            Type::Unknown(_) | Type::Generic(_) => true,
+
+            Type::Void | Type::Bool | Type::Int | Type::Float => false,
+        }
+    }
 }
 
 pub fn typecheck(ast: &mut Ast) -> Typechecker {
@@ -1113,21 +1142,21 @@ pub fn typecheck(ast: &mut Ast) -> Typechecker {
 
     // first pass: gather userdefs names and arguments only
     for stmt in &ast.global_stmts {
-        if let Err(e) = tc.first_pass(&mut env, ast, *stmt) {
+        if let Err(e) = tc.first_userdefs_pass(&mut env, ast, *stmt) {
             tc.report_error(e);
         }
     }
 
     // second pass: gather top level symbols (struct fields and function signatures)
     for stmt in &ast.global_stmts {
-        if let Err(e) = tc.second_pass(&mut env, ast, *stmt) {
+        if let Err(e) = tc.second_decl_pass(&mut env, ast, *stmt) {
             tc.report_error(e);
         }
     }
 
     // third pass, global variables and scan function bodies
     for stmt in &ast.global_stmts {
-        if let Err(e) = tc.typecheck(&mut env, ast, *stmt) {
+        if let Err(e) = tc.third_global_pass(&mut env, ast, *stmt) {
             tc.report_error(e);
         }
     }
@@ -1148,6 +1177,19 @@ pub fn typecheck(ast: &mut Ast) -> Typechecker {
                 content.ty = Some(annot);
             }
             _ => unreachable!(),
+        }
+    }
+
+    // collect funcs and structs instances
+    for (id, ty) in tc.types.iter().map(|(id, x)| (TypeId(id), x)) {
+        if matches!(ty, Type::Func { .. }) {
+            if !tc.ty_is_generic(id) {
+                tc.funcs_instances.insert(id);
+            }
+        } else if matches!(ty, Type::UserDef { .. }) {
+            if !tc.ty_is_generic(id) {
+                tc.structs_instances.insert(id);
+            }
         }
     }
 
