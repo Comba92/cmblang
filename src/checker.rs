@@ -85,17 +85,17 @@ pub enum Type {
 
 #[derive(Debug, Clone)]
 pub struct StructInfo {
-    generics: List<IdentId>,
-    name: IdentId,
-    fields: List<(IdentId, TypeId)>,
+    pub generics: List<IdentId>,
+    pub name: IdentId,
+    pub fields: List<(IdentId, TypeId)>,
 }
 
 #[derive(Debug, Clone)]
 pub struct FuncInfo {
-    generics: List<IdentId>,
-    params: List<TypeId>,
-    ret: TypeId,
-    body: Block,
+    pub generics: List<IdentId>,
+    pub params: List<TypeId>,
+    pub ret: TypeId,
+    pub body: Block,
 }
 
 const VOID_ID: TypeId = TypeId(0);
@@ -176,8 +176,8 @@ pub struct Typechecker {
     pub funcs: HashMap<TypeId, FuncInfo>,
     pub structs: HashMap<IdentId, StructInfo>,
 
-    pub funcs_instances: Vec<FuncInfo>,
-    pub structs_instances: Vec<StructInfo>,
+    pub funcs_instances: Vec<FuncInfo>, // todo: make these another kind of struct
+    pub structs_instances: Vec<StructInfo>, // todo: make these another kind of struct
 
     pub types: Interner<Type>,
     substs: Unification,
@@ -186,6 +186,7 @@ pub struct Typechecker {
     func_ret: Option<TypeId>,
 
     untyped_vars: Vec<(StmtId, TypeId)>,
+    pub stmts_types: HashMap<StmtId, TypeId>, // TODO: temporary solution
 
     pub errors: Vec<TypeError>,
 }
@@ -214,6 +215,7 @@ impl Default for Typechecker {
             func_ret: None,
 
             untyped_vars: vec![],
+            stmts_types: Default::default(),
 
             errors: vec![],
         }
@@ -1243,6 +1245,15 @@ pub fn typecheck(ast: &mut Ast) -> Typechecker {
 
         content.ty = Some(annot);
     }
+
+    //     for stmt_id in (0..ast.stmts.len()).map(|i| StmtId(i as Id)) {
+    //         match ast.get_stmt(stmt_id) {
+    //             Stmt::VarDecl(content) => {}
+    //             Stmt::Expr(expr) => {}
+    //
+    //             _ => {}
+    //         }
+    //     }
 
     // funcs monomorphization
     for id in (0..tc.types.len()).map(|i| TypeId(i as Id)) {
