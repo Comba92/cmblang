@@ -1,1 +1,4 @@
-int a;int b;int c;int d;int test(int,float);int a=((10+1)*5+2)-20*45;int b=5;int c=a+b;int d=a+20;int test(int gg,float bb){int a=1;int b=0;int d=0;int e=1;void c={int d=0;int e=1;};int f=69;int g=420;{int f=69;int g=420;};return 0;}
+
+int main() {
+
+}

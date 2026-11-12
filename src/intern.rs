@@ -51,6 +51,10 @@ impl<T: hash::Hash> Interner<T> {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.id_to_value.len()
+    }
+
     pub fn lookup(&self, val: &T) -> Option<u32> {
         let hash = hash(&val);
         self.hash_to_id.get(&hash).copied()

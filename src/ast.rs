@@ -22,27 +22,53 @@ impl Ast {
         }
     }
 
-    pub fn get_expr(&self, expr: ExprId) -> &Spanned<Expr> {
+    pub fn get_expr_n_span(&self, expr: ExprId) -> &Spanned<Expr> {
         &self.exprs[expr.0 as usize]
     }
 
-    pub fn get_stmt(&self, stmt: StmtId) -> &Spanned<Stmt> {
+    pub fn get_stmt_n_span(&self, stmt: StmtId) -> &Spanned<Stmt> {
         &self.stmts[stmt.0 as usize]
     }
 
-    pub fn get_stmt_mut(&mut self, id: StmtId) -> &mut Spanned<Stmt> {
-        &mut self.stmts[id.0 as usize]
+    pub fn get_annot_n_span(&self, annot: TyAnnotId) -> &Spanned<TyAnnot> {
+        &self.annots[annot.0 as usize]
+    }
+
+    pub fn get_expr(&self, expr: ExprId) -> &Expr {
+        &self.exprs[expr.0 as usize].0
+    }
+
+    pub fn get_stmt(&self, stmt: StmtId) -> &Stmt {
+        &self.stmts[stmt.0 as usize].0
+    }
+
+    pub fn get_annot(&self, annot: TyAnnotId) -> &TyAnnot {
+        &self.annots[annot.0 as usize].0
+    }
+
+    pub fn get_stmt_mut(&mut self, id: StmtId) -> &mut Stmt {
+        &mut self.stmts[id.0 as usize].0
     }
 
     pub fn get_str(&self, ident: IdentId) -> &str {
         self.idents.get(ident.0)
     }
 
-    pub fn get_annot(&self, annot: TyAnnotId) -> &Spanned<TyAnnot> {
-        &self.annots[annot.0 as usize]
+    // TEMP: Needed for monomorphization
+    pub fn add_expr(&mut self, expr: Expr) -> ExprId {
+        let id = self.exprs.len();
+        self.exprs.push((expr, Span { start: 0, end: 0 }));
+        ExprId(id as Id)
     }
 
-    // TEMP: needed for typechecker last pass
+    // TEMP: Needed for monomorphization
+    pub fn add_stmt(&mut self, stmt: Stmt) -> StmtId {
+        let id = self.stmts.len();
+        self.stmts.push((stmt, Span { start: 0, end: 0 }));
+        StmtId(id as Id)
+    }
+
+    // TEMP: needed for zonking
     pub fn add_ty_annot(&mut self, ty: TyAnnot) -> TyAnnotId {
         let id = self.annots.len();
         self.annots.push((ty, Span { start: 0, end: 0 }));

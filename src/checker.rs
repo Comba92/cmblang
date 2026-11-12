@@ -1,4 +1,4 @@
-use crate::{intern::*, *};
+use crate::{TypeErrorKind::TypeAlreadyDeclared, intern::*, *};
 use std::collections::{HashMap, HashSet};
 
 // https://www.reddit.com/r/ProgrammingLanguages/comments/v5zwlw/resources_for_building_a_typechecker/
@@ -21,12 +21,6 @@ pub struct Environment {
 
 impl Default for Environment {
     fn default() -> Self {
-        let mut types = Interner::new();
-        for primitive in PRIMITIVES {
-            let id = types.add(primitive.0.clone());
-            debug_assert_eq!(id, primitive.1.0);
-        }
-
         Self {
             vars_scopes: vec![HashMap::new()],
             ty_scopes: vec![PRIMITIVES.iter().map(|p| p.1).collect()],
@@ -48,11 +42,14 @@ impl Environment {
         self.vars_scopes.first().unwrap().get(&name).copied()
     }
 
-    // TODO: check if value already exists
-    fn bind_var(&mut self, name: IdentId, ty: TypeId) {
-        self.vars_scopes.last_mut().unwrap().insert(name, ty);
+    fn bind_var(&mut self, name: IdentId, ty: TypeId, span: Span) -> TypeResult<()> {
+        match self.vars_scopes.last_mut().unwrap().insert(name, ty) {
+            Some(_) => Err(tyerr(TypeErrorKind::VarAlreadyDeclared(name), &span)),
+            None => Ok(()),
+        }
     }
 
+    // TODO: we can shadow primitve names with types scopes. Thats a big problem
     fn ty_exists(&self, ty: TypeId) -> bool {
         self.ty_scopes.iter().rev().any(|scope| scope.contains(&ty))
     }
@@ -98,6 +95,7 @@ pub struct FuncInfo {
     generics: List<IdentId>,
     params: List<TypeId>,
     ret: TypeId,
+    body: Block,
 }
 
 const VOID_ID: TypeId = TypeId(0);
@@ -122,6 +120,7 @@ pub enum TypeErrorKind {
     TypeMismatch { expected: TypeId, actual: TypeId },
     InfiniteType { source: TypeId, contains: TypeId },
     RequiredAnnotation,
+    UnresolvedType,
 
     InvalidStmtInGlobal,
     InvalidStmtInBlock,
@@ -132,6 +131,8 @@ pub enum TypeErrorKind {
 
     WrongStructLiteralCount { expected: usize, actual: usize },
     WrongStructLiteralField(IdentId),
+    TypeAlreadyDeclared(IdentId),
+    VarAlreadyDeclared(IdentId),
 
     DuplicateParamsInFunction(IdentId),
     DuplicateGenericsInFunction(IdentId),
@@ -148,6 +149,7 @@ pub enum TypeErrorKind {
     InvalidLastStmtInBlock,
 
     SelfReferentialStruct(IdentId),
+    MissingMainFunction,
 }
 impl TypeErrorKind {}
 
@@ -160,36 +162,38 @@ type TypeResult<T> = Result<T, TypeError>;
 
 // TODO: temporary solution
 // Basically a simple Union-find, not optimized
-#[derive(Default)]
-struct Unification(Vec<Option<TypeId>>);
+#[derive(Default, Debug)]
+struct Unification(Vec<TypeId>);
 impl Unification {
-    pub fn fresh(&mut self) -> u32 {
-        let id = self.0.len() as u32;
-        self.0.push(None);
-        id
-    }
+    // pub fn fresh(&mut self) -> u32 {
+    //     let id = self.0.len() as u32;
+    //     self.0.push(None);
+    //     id
+    // }
 }
 
 pub struct Typechecker {
-    pub funcs: HashMap<IdentId, FuncInfo>,
+    pub funcs: HashMap<TypeId, FuncInfo>,
     pub structs: HashMap<IdentId, StructInfo>,
 
-    pub funcs_instances: HashSet<TypeId>,
-    pub structs_instances: HashSet<TypeId>,
-    pub types: Interner<Type>,
+    pub funcs_instances: Vec<FuncInfo>,
+    pub structs_instances: Vec<StructInfo>,
 
+    pub types: Interner<Type>,
     substs: Unification,
 
     loop_depth: u32,
     func_ret: Option<TypeId>,
 
     vars_typed: Vec<(StmtId, TypeId)>, // TODO: temporary solution, find fix
+    // vars_typed: Vec<(VarContent, TypeId)>,
     pub errors: Vec<TypeError>,
 }
 
 impl Default for Typechecker {
     fn default() -> Self {
         let mut types = Interner::new();
+
         for primitive in PRIMITIVES {
             let id = types.add(primitive.0.clone());
             debug_assert_eq!(id, primitive.1.0);
@@ -233,12 +237,14 @@ fn type_to_annotation(ty_id: TypeId, tc: &Typechecker, ast: &mut Ast) -> TyAnnot
             args: Default::default(),
         },
 
-        Type::Generic(name) => TyAnnot::Type {
-            name: *name,
+        Type::Generic(ident) => TyAnnot::Type {
+            name: *ident,
             args: Default::default(),
         },
 
-        Type::Unknown(_) => unreachable!("can't convert a type var to a type annotation"),
+        Type::Unknown(_) => {
+            unreachable!("can't convert a type var or generic to a type annotation")
+        }
 
         Type::Func { params, ret, .. } => {
             let mut list = Vec::new();
@@ -274,14 +280,20 @@ impl Typechecker {
     }
 
     fn add_unknown_ty(&mut self, env: &mut Environment) -> TypeId {
-        let id = self.substs.fresh();
-        self.add_type(env, Type::Unknown(id))
+        // let id = self.substs.fresh();
+        // self.add_type(env, Type::Unknown(id))
+
+        let tyvar = self.substs.0.len() as u32;
+        let id = self.add_type(env, Type::Unknown(tyvar));
+        self.substs.0.push(id);
+        id
     }
 
     fn get_type(&self, id: TypeId) -> &Type {
         self.types.get(id.0)
     }
 
+    // TODO: is this even needed? if we really want scoped types, shouldn't we assign them and unique id or hash so that they dont collide with others?
     fn lookup_ty(&self, env: &Environment, ty: &Type) -> Option<TypeId> {
         self.types
             .lookup(ty)
@@ -300,7 +312,7 @@ impl Typechecker {
         ast: &Ast,
         annot_id: TyAnnotId,
     ) -> TypeResult<TypeId> {
-        let (annot, span) = ast.get_annot(annot_id);
+        let (annot, span) = ast.get_annot_n_span(annot_id);
         let ty = match annot {
             TyAnnot::Type { name, args } => {
                 let str = ast.get_str(*name);
@@ -385,22 +397,19 @@ impl Typechecker {
         env: &mut Environment,
         ast: &Ast,
         var: &VarContent,
-        stmt_id: StmtId,
-        span: &Span,
+        span: Span,
     ) -> TypeResult<()> {
         let final_ty = if let Some(ty_annot) = var.ty {
-            let annot_id = self.add_type_from_annotation(env, ast, ty_annot)?;
-            self.check(env, ast, var.rhs, annot_id)
-                .map_err(|e| tyerr(TypeErrorKind::WrongAnnotation { cause: Box::new(e) }, span))?;
+            let annot_ty_id = self.add_type_from_annotation(env, ast, ty_annot)?;
+            self.check(env, ast, var.rhs, annot_ty_id)
+                .map_err(|e| tyerr(TypeErrorKind::WrongAnnotation { cause: Box::new(e) }, &span))?;
 
-            annot_id
+            annot_ty_id
         } else {
             self.infer(env, ast, var.rhs)?
         };
 
-        env.bind_var(var.name, final_ty);
-        self.vars_typed.push((stmt_id, final_ty));
-
+        env.bind_var(var.name, final_ty, span)?;
         Ok(())
     }
 
@@ -413,9 +422,16 @@ impl Typechecker {
         // this pass only collects the structs names and arguments
         // a struct can reference another struct which might be not yet declared
 
-        let (stmt, span) = ast.get_stmt(stmt_id);
+        let (stmt, span) = ast.get_stmt_n_span(stmt_id);
         match stmt {
             Stmt::StructDecl(content) => {
+                if self.structs.contains_key(&content.name) {
+                    return Err(tyerr(
+                        TypeErrorKind::TypeAlreadyDeclared(content.name),
+                        span,
+                    ));
+                }
+
                 if has_duplicates(&content.generics, |g| *g) {
                     return Err(tyerr(
                         TypeErrorKind::DuplicateGenericsInStruct(content.name),
@@ -423,7 +439,6 @@ impl Typechecker {
                     ));
                 }
 
-                // TODO: what if we have colliding names?
                 self.structs.insert(
                     content.name,
                     StructInfo {
@@ -446,10 +461,12 @@ impl Typechecker {
         ast: &Ast,
         stmt_id: StmtId,
     ) -> TypeResult<()> {
-        let (stmt, span) = ast.get_stmt(stmt_id);
+        let (stmt, span) = ast.get_stmt_n_span(stmt_id);
         match stmt {
             Stmt::FuncDecl(content) => {
-                // TODO: should check if fn name already exists or else the ones declared earlier get shadowed globally
+                if env.lookup_global_var(content.name).is_some() {
+                    return Err(tyerr(TypeErrorKind::VarAlreadyDeclared(content.name), span));
+                }
 
                 // TODO: should we check if generic names collides with primitive name?
                 if has_duplicates(&content.generics, |g| *g) {
@@ -459,12 +476,13 @@ impl Typechecker {
                     ));
                 }
 
-                if has_duplicates(&content.params, |p| p.0) {
-                    return Err(tyerr(
-                        TypeErrorKind::DuplicateParamsInFunction(content.name),
-                        span,
-                    ));
-                }
+                // // TODO: probably not needed anymore. bind already checks for this
+                // if has_duplicates(&content.params, |p| p.0) {
+                //     return Err(tyerr(
+                //         TypeErrorKind::DuplicateParamsInFunction(content.name),
+                //         span,
+                //     ));
+                // }
 
                 let (params, ret) = env.with_ty_scope(|env| -> TypeResult<_> {
                     for generic in &content.generics {
@@ -493,16 +511,17 @@ impl Typechecker {
                 let ty_id = self.add_type(env, ty);
 
                 self.funcs.insert(
-                    content.name,
+                    ty_id,
                     FuncInfo {
                         generics: content.generics.clone(),
                         params: params.into(),
                         ret,
+                        body: content.code.clone(),
                     },
                 );
 
-                // TODO: can we shadow function names?
-                env.bind_var(content.name, ty_id);
+                // we cant shadow global function names because we checked for it earlier
+                env.bind_var(content.name, ty_id, *span)?;
             }
 
             Stmt::StructDecl(content) => {
@@ -521,7 +540,10 @@ impl Typechecker {
                     let mut fields = Vec::new();
                     for field in &content.fields {
                         let ty_id = self.add_type_from_annotation(env, ast, field.1)?;
-                        self.ty_self_referential_check(ty_id, content.name)?;
+                        self.ty_self_referential_check(ty_id, content.name)
+                            .map_err(|_| {
+                                tyerr(TypeErrorKind::SelfReferentialStruct(content.name), span)
+                            })?;
 
                         fields.push((field.0, ty_id));
                     }
@@ -548,15 +570,19 @@ impl Typechecker {
         ast: &Ast,
         stmt_id: StmtId,
     ) -> TypeResult<()> {
-        let (stmt, span) = ast.get_stmt(stmt_id);
+        let (stmt, span) = ast.get_stmt_n_span(stmt_id);
         match stmt {
-            Stmt::VarDecl(content) => self.var_decl(env, ast, content, stmt_id, span)?,
+            Stmt::VarDecl(content) => self.var_decl(env, ast, content, *span)?,
 
             Stmt::FuncDecl(content) => {
+                let ty_id = env
+                    .lookup_global_var(content.name)
+                    .ok_or_else(|| tyerr(TypeErrorKind::UndeclaredVar(content.name), span))?;
+
                 let info = self
                     .funcs
-                    .get(&content.name)
-                    .ok_or_else(|| tyerr(TypeErrorKind::UndeclaredVar(content.name), span))?;
+                    .get(&ty_id)
+                    .expect("function should have been checked during the previous pass");
 
                 let ret_expected = info.ret;
                 self.func_ret = Some(ret_expected);
@@ -570,7 +596,7 @@ impl Typechecker {
                         }
 
                         for (param_ty, param_content) in params.iter().zip(content.params.iter()) {
-                            env.bind_var(param_content.0, *param_ty);
+                            env.bind_var(param_content.0, *param_ty, *span)?;
                         }
 
                         self.infer_block(env, ast, &content.code)
@@ -579,10 +605,9 @@ impl Typechecker {
 
                 self.func_ret = None;
                 ret_actual?;
-                // self.unify(env, ret_actual, ret_expected, span)?;
             }
 
-            Stmt::StructDecl(_) => {} // Do nothing, already done in top level pass
+            Stmt::StructDecl(_) => {} // Do nothing, already done in previous pass
             Stmt::Continue | Stmt::Break => {
                 Err(tyerr(TypeErrorKind::InvalidControlStmtInBlock, span))?
             }
@@ -594,6 +619,7 @@ impl Typechecker {
     }
 
     // TODO: this fails IMMEDIATELY, add statement level granularity for errors
+    // TODO: please refactor this motherfucker
     fn infer_block(
         &mut self,
         env: &mut Environment,
@@ -603,12 +629,12 @@ impl Typechecker {
         // iter over all except the last
         // this is important because otherwise we would add two different type variables for the last expression and incurr in a type error
         for stmt_id in block.list.iter().rev().skip(1).rev().copied() {
-            let (stmt, span) = ast.get_stmt(stmt_id);
+            let (stmt, span) = ast.get_stmt_n_span(stmt_id);
             match stmt {
-                Stmt::VarDecl(content) => self.var_decl(env, ast, content, stmt_id, span)?,
+                Stmt::VarDecl(content) => self.var_decl(env, ast, content, *span)?,
 
                 Stmt::Expr(expr_id) => {
-                    let (expr, _) = ast.get_expr(*expr_id);
+                    let (expr, _) = ast.get_expr_n_span(*expr_id);
 
                     match expr {
                         Expr::Return(expr_id) => match &self.func_ret {
@@ -643,7 +669,7 @@ impl Typechecker {
 
         let mut ret_ty = None;
         if let Some(last) = block.list.last() {
-            let (stmt, span) = ast.get_stmt(*last);
+            let (stmt, span) = ast.get_stmt_n_span(*last);
 
             match stmt {
                 Stmt::Expr(expr_id) => match &self.func_ret {
@@ -666,11 +692,11 @@ impl Typechecker {
                         } else {
                             match stmt {
                                 Stmt::VarDecl(content) => {
-                                    self.var_decl(env, ast, content, *last, span)?
+                                    self.var_decl(env, ast, content, *span)?
                                 }
 
                                 Stmt::Expr(expr_id) => {
-                                    let (expr, _) = ast.get_expr(*expr_id);
+                                    let (expr, _) = ast.get_expr_n_span(*expr_id);
 
                                     match expr {
                                         Expr::Return(expr_id) => match &self.func_ret {
@@ -714,7 +740,7 @@ impl Typechecker {
     }
 
     fn infer(&mut self, env: &mut Environment, ast: &Ast, expr: ExprId) -> TypeResult<TypeId> {
-        let (expr, span) = ast.get_expr(expr);
+        let (expr, span) = ast.get_expr_n_span(expr);
         let id = match expr {
             Expr::Empty => VOID_ID,
             Expr::BoolLiteral(_) => BOOL_ID,
@@ -785,12 +811,8 @@ impl Typechecker {
 
             Expr::Call { callee, args } => {
                 let ty_id = self.infer(env, ast, *callee)?;
-                match self.get_type(ty_id).clone() {
+                match self.get_type(ty_id) {
                     Type::Func { params, ret } => {
-                        for (param, arg) in params.iter().zip(args.iter()) {
-                            self.check(env, ast, *arg, *param)?;
-                        }
-
                         if params.len() != args.len() {
                             return Err(tyerr(
                                 TypeErrorKind::WrongCallArgumentsCount {
@@ -801,7 +823,11 @@ impl Typechecker {
                             ));
                         }
 
-                        // return value might be a type variable, we have to normalize and get the potential solved type
+                        let ret = *ret;
+                        for (param, arg) in params.clone().iter().zip(args.iter()) {
+                            self.check(env, ast, *arg, *param)?;
+                        }
+
                         ret
                     }
 
@@ -869,7 +895,7 @@ impl Typechecker {
         Ok(id)
     }
 
-    // TODO: might need to add an erorr variant util so we know which kind of type mismatch wege vot
+    // TODO: might need to add an erorr variant util so we know which kind of type mismatch weve vot
     fn check(
         &mut self,
         env: &mut Environment,
@@ -877,7 +903,7 @@ impl Typechecker {
         expr_id: ExprId,
         expected_ty: TypeId,
     ) -> TypeResult<TypeId> {
-        let (_, span) = ast.get_expr(expr_id);
+        let (_, span) = ast.get_expr_n_span(expr_id);
 
         let inferred_ty = self.infer(env, ast, expr_id)?;
         self.unify(env, expected_ty, inferred_ty, span)?;
@@ -1008,10 +1034,16 @@ impl Typechecker {
     fn ty_normalize(&self, env: &Environment, ty: TypeId) -> TypeId {
         match self.get_type(ty) {
             Type::Unknown(x) => {
-                if let Some(parent) = self.substs.0[*x as usize] {
-                    self.ty_normalize(env, parent)
-                } else {
+                // if let Some(parent) = self.substs.0[*x as usize] {
+                //     self.ty_normalize(env, parent)
+                // } else {
+                //     ty
+                // }
+                let next = self.substs.0[*x as usize];
+                if next == ty {
                     ty
+                } else {
+                    self.ty_normalize(env, next)
                 }
             }
 
@@ -1021,11 +1053,12 @@ impl Typechecker {
 
     // substitute an equality constraint between type variable and monomorphic type
     fn ty_substitute(&mut self, type_var: u32, ty: TypeId) {
-        self.substs.0[type_var as usize] = Some(ty);
+        // self.substs.0[type_var as usize] = Some(ty);
+        self.substs.0[type_var as usize] = ty;
     }
 
     // instantiate a generic type to a concrete one
-    // generic arguments are converted to type variables
+    // generic arguments not solved are converted to type variables
     fn ty_instantiate(
         &mut self,
         env: &mut Environment,
@@ -1065,8 +1098,8 @@ impl Typechecker {
             }
 
             Type::Generic(name) => {
-                if let Some(fresh) = generics.get(&name) {
-                    *fresh
+                if let Some(concrete) = generics.get(&name) {
+                    *concrete
                 } else {
                     let fresh = self.add_unknown_ty(env);
                     generics.insert(name, fresh);
@@ -1092,7 +1125,7 @@ impl Typechecker {
         }
     }
 
-    fn ty_self_referential_check(&self, curr: TypeId, parent: IdentId) -> TypeResult<()> {
+    fn ty_self_referential_check(&self, curr: TypeId, parent: IdentId) -> Result<(), ()> {
         match self.get_type(curr) {
             Type::Void | Type::Bool | Type::Int | Type::Float => Ok(()),
             Type::Generic(_) => Ok(()),
@@ -1107,10 +1140,7 @@ impl Typechecker {
             }
             Type::UserDef { args, name } => {
                 if *name == parent {
-                    return Err(tyerr(
-                        TypeErrorKind::SelfReferentialStruct(parent),
-                        &Span { start: 0, end: 0 }, // TODO: no span here
-                    ));
+                    return Err(());
                 }
 
                 for arg in args {
@@ -1161,17 +1191,33 @@ pub fn typecheck(ast: &mut Ast) -> Typechecker {
         }
     }
 
-    // TODO: should check for any unresolved variable?
+    // TODO: check for any unresolved type
+    if tc
+        .substs
+        .0
+        .iter()
+        .any(|t| matches!(tc.get_type(*t), Type::Unknown(_)))
+    {
+        tc.report_error(tyerr(
+            TypeErrorKind::UnresolvedType,
+            &Span { start: 0, end: 0 },
+        ));
+    }
 
     if !tc.errors.is_empty() {
         return tc;
     }
 
+    println!("{:?}", tc.types);
+    println!("{:?}", tc.vars_typed);
+
+    println!("ZONKING starts");
+
     // final pass to assign final types to variables declarations
     // (zonking)
     for (stmt_id, ty_id) in &tc.vars_typed {
         let annot = type_to_annotation(*ty_id, &tc, ast);
-        let (stmt, _) = ast.get_stmt_mut(*stmt_id);
+        let stmt = ast.get_stmt_mut(*stmt_id);
         match stmt {
             Stmt::VarDecl(content) => {
                 content.ty = Some(annot);
@@ -1180,18 +1226,123 @@ pub fn typecheck(ast: &mut Ast) -> Typechecker {
         }
     }
 
-    // collect funcs and structs instances
-    for (id, ty) in tc.types.iter().map(|(id, x)| (TypeId(id), x)) {
-        if matches!(ty, Type::Func { .. }) {
-            if !tc.ty_is_generic(id) {
-                tc.funcs_instances.insert(id);
+    println!("ZONKING ends");
+
+    // funcs monomorphization
+    for id in (0..tc.types.len()).map(|i| TypeId(i as Id)) {
+        let ty = tc.get_type(id);
+        match ty {
+            Type::Func { params, ret } => {
+                let params = params.clone();
+                let ret = *ret;
+
+                if params.iter().any(|t| tc.ty_is_generic(*t)) || tc.ty_is_generic(ret) {
+                    continue;
+                }
+
+                let info = tc.funcs.get(&id).unwrap().clone();
+                debug_assert_eq!(params.len(), info.params.len());
+                if info.generics.is_empty() {
+                    tc.funcs_instances.push(info);
+                    continue;
+                }
+
+                let substs: HashMap<_, _> = info
+                    .params
+                    .iter()
+                    .zip(params.iter())
+                    .filter_map(|(decl_param, call_param)| match tc.get_type(*decl_param) {
+                        Type::Generic(x) => Some((*x, *call_param)),
+                        _ => None,
+                    })
+                    .collect();
+
+                let mut body = Vec::new();
+                for stmt_id in &info.body.list {
+                    match ast.get_stmt(*stmt_id) {
+                        Stmt::VarDecl(content) => {
+                            let annot_id =
+                                content.ty.expect("zoking should have already been done");
+
+                            match ast.get_annot(annot_id) {
+                                // if the type is named...
+                                TyAnnot::Type { name, .. } => {
+                                    // ... and it turns out its a generic ...
+                                    let new_stmt = if let Some(sub) = substs.get(name) {
+                                        let content = content.clone();
+                                        let annot = type_to_annotation(*sub, &tc, ast);
+
+                                        // ... make the substitution!
+                                        ast.add_stmt(Stmt::VarDecl(VarContent {
+                                            ty: Some(annot),
+                                            ..content
+                                        }))
+                                    } else {
+                                        *stmt_id
+                                    };
+
+                                    body.push(new_stmt);
+                                }
+
+                                _ => body.push(*stmt_id),
+                            }
+                        }
+
+                        _ => body.push(*stmt_id), // TODO: this makes statements not conescutive anymore, here a new statements should be cloned and added again
+                    }
+                }
+
+                let instance = FuncInfo {
+                    body: Block { list: body.into() },
+                    ..info
+                };
+                tc.funcs_instances.push(instance);
             }
-        } else if matches!(ty, Type::UserDef { .. }) {
-            if !tc.ty_is_generic(id) {
-                tc.structs_instances.insert(id);
-            }
+
+            _ => {}
         }
     }
+
+    // structs monomorphization
+    for id in 0..tc.types.len() {
+        match tc.get_type(TypeId(id as Id)) {
+            Type::UserDef { name, args } => {
+                if let Some(info) = tc.structs.get(&name) {
+                    debug_assert_eq!(args.len(), info.generics.len());
+
+                    if info.generics.is_empty() {
+                        tc.structs_instances.push(info.clone());
+                        continue;
+                    }
+
+                    let mut substs: HashMap<_, _> = info
+                        .generics
+                        .iter()
+                        .copied()
+                        .zip(args.iter().copied())
+                        .collect();
+                    let mut concrete_fields = info.fields.clone();
+
+                    let name = info.name;
+                    for field in concrete_fields.iter_mut() {
+                        field.1 = tc.ty_instantiate(&mut env, field.1, &mut substs);
+                    }
+
+                    let instance = StructInfo {
+                        generics: Default::default(),
+                        name,
+                        fields: concrete_fields,
+                    };
+
+                    tc.structs_instances.push(instance);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    println!("{:?}", tc.funcs_instances);
+    println!("{:?}", tc.structs_instances);
 
     tc
 }
