@@ -185,8 +185,8 @@ pub struct Typechecker {
     loop_depth: u32,
     func_ret: Option<TypeId>,
 
-    vars_typed: Vec<(StmtId, TypeId)>, // TODO: temporary solution, find fix
-    // vars_typed: Vec<(VarContent, TypeId)>,
+    untyped_vars: Vec<(StmtId, TypeId)>,
+
     pub errors: Vec<TypeError>,
 }
 
@@ -213,7 +213,8 @@ impl Default for Typechecker {
             loop_depth: 0,
             func_ret: None,
 
-            vars_typed: vec![],
+            untyped_vars: vec![],
+
             errors: vec![],
         }
     }
@@ -243,7 +244,7 @@ fn type_to_annotation(ty_id: TypeId, tc: &Typechecker, ast: &mut Ast) -> TyAnnot
         },
 
         Type::Unknown(_) => {
-            unreachable!("can't convert a type var or generic to a type annotation")
+            unreachable!("can't convert a type var to a type annotation")
         }
 
         Type::Func { params, ret, .. } => {
@@ -397,6 +398,7 @@ impl Typechecker {
         env: &mut Environment,
         ast: &Ast,
         var: &VarContent,
+        stmt_id: StmtId,
         span: Span,
     ) -> TypeResult<()> {
         let final_ty = if let Some(ty_annot) = var.ty {
@@ -406,7 +408,9 @@ impl Typechecker {
 
             annot_ty_id
         } else {
-            self.infer(env, ast, var.rhs)?
+            let ty = self.infer(env, ast, var.rhs)?;
+            self.untyped_vars.push((stmt_id, ty));
+            ty
         };
 
         env.bind_var(var.name, final_ty, span)?;
@@ -572,7 +576,7 @@ impl Typechecker {
     ) -> TypeResult<()> {
         let (stmt, span) = ast.get_stmt_n_span(stmt_id);
         match stmt {
-            Stmt::VarDecl(content) => self.var_decl(env, ast, content, *span)?,
+            Stmt::VarDecl(content) => self.var_decl(env, ast, content, stmt_id, *span)?,
 
             Stmt::FuncDecl(content) => {
                 let ty_id = env
@@ -631,7 +635,7 @@ impl Typechecker {
         for stmt_id in block.list.iter().rev().skip(1).rev().copied() {
             let (stmt, span) = ast.get_stmt_n_span(stmt_id);
             match stmt {
-                Stmt::VarDecl(content) => self.var_decl(env, ast, content, *span)?,
+                Stmt::VarDecl(content) => self.var_decl(env, ast, content, stmt_id, *span)?,
 
                 Stmt::Expr(expr_id) => {
                     let (expr, _) = ast.get_expr_n_span(*expr_id);
@@ -668,8 +672,8 @@ impl Typechecker {
         // if block has no elements, its just void
 
         let mut ret_ty = None;
-        if let Some(last) = block.list.last() {
-            let (stmt, span) = ast.get_stmt_n_span(*last);
+        if let Some(last_id) = block.list.last() {
+            let (stmt, span) = ast.get_stmt_n_span(*last_id);
 
             match stmt {
                 Stmt::Expr(expr_id) => match &self.func_ret {
@@ -692,7 +696,7 @@ impl Typechecker {
                         } else {
                             match stmt {
                                 Stmt::VarDecl(content) => {
-                                    self.var_decl(env, ast, content, *span)?
+                                    self.var_decl(env, ast, content, *last_id, *span)?
                                 }
 
                                 Stmt::Expr(expr_id) => {
@@ -918,8 +922,8 @@ impl Typechecker {
         ty_id_b: TypeId,
         span: &Span,
     ) -> TypeResult<()> {
-        let ty_id_a = self.ty_normalize(env, ty_id_a);
-        let ty_id_b = self.ty_normalize(env, ty_id_b);
+        let ty_id_a = self.ty_normalize(ty_id_a);
+        let ty_id_b = self.ty_normalize(ty_id_b);
 
         // TODO: moving the types interner to environment would not require cloning here anymore, but thats a design choice
         let ty_a = self.get_type(ty_id_a).clone();
@@ -1031,11 +1035,11 @@ impl Typechecker {
     }
 
     // get the solved type from a type variable
-    fn ty_normalize(&self, env: &Environment, ty: TypeId) -> TypeId {
+    fn ty_normalize(&self, ty: TypeId) -> TypeId {
         match self.get_type(ty) {
             Type::Unknown(x) => {
                 // if let Some(parent) = self.substs.0[*x as usize] {
-                //     self.ty_normalize(env, parent)
+                //     self.ty_normalize(parent)
                 // } else {
                 //     ty
                 // }
@@ -1043,7 +1047,7 @@ impl Typechecker {
                 if next == ty {
                     ty
                 } else {
-                    self.ty_normalize(env, next)
+                    self.ty_normalize(next)
                 }
             }
 
@@ -1055,6 +1059,27 @@ impl Typechecker {
     fn ty_substitute(&mut self, type_var: u32, ty: TypeId) {
         // self.substs.0[type_var as usize] = Some(ty);
         self.substs.0[type_var as usize] = ty;
+    }
+
+    fn ty_solve(&self, ty: TypeId) -> TypeId {
+        let ty = self.ty_normalize(ty);
+        match self.get_type(ty) {
+            Type::Void | Type::Bool | Type::Int | Type::Float => ty,
+            Type::Func { params, ret } => {
+                params.iter().for_each(|p| {
+                    self.ty_solve(*p);
+                });
+                self.ty_solve(*ret)
+            }
+            Type::UserDef { args, .. } => {
+                args.iter().for_each(|a| {
+                    self.ty_solve(*a);
+                });
+                ty
+            }
+            Type::Generic(_) => ty,
+            Type::Unknown(_) => ty,
+        }
     }
 
     // instantiate a generic type to a concrete one
@@ -1208,25 +1233,16 @@ pub fn typecheck(ast: &mut Ast) -> Typechecker {
         return tc;
     }
 
-    println!("{:?}", tc.types);
-    println!("{:?}", tc.vars_typed);
+    // zonking
+    for (stmt_id, ty_id) in &tc.untyped_vars {
+        let annot = type_to_annotation(tc.ty_solve(*ty_id), &tc, ast);
 
-    println!("ZONKING starts");
+        let Stmt::VarDecl(content) = ast.get_stmt_mut(*stmt_id) else {
+            unreachable!()
+        };
 
-    // final pass to assign final types to variables declarations
-    // (zonking)
-    for (stmt_id, ty_id) in &tc.vars_typed {
-        let annot = type_to_annotation(*ty_id, &tc, ast);
-        let stmt = ast.get_stmt_mut(*stmt_id);
-        match stmt {
-            Stmt::VarDecl(content) => {
-                content.ty = Some(annot);
-            }
-            _ => unreachable!(),
-        }
+        content.ty = Some(annot);
     }
-
-    println!("ZONKING ends");
 
     // funcs monomorphization
     for id in (0..tc.types.len()).map(|i| TypeId(i as Id)) {
